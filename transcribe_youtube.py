@@ -6,6 +6,7 @@ Use only for videos you're authorized to process.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import math
 from pathlib import Path
@@ -123,6 +124,8 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument('-o', '--output', default=None, help='輸出 SRT 路徑')
     parser.add_argument('--language', default=None, help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；空字串自動偵測')
     parser.add_argument('--model', default=None, help='轉錄模型名稱')
+    parser.add_argument('--audio-input', choices=('file', 'inline'), default=None,
+                        help='音訊傳送方法：file 用 Files API；inline 用 Base64 直傳 Interactions API')
     parser.add_argument('--api-base-url', default=None, metavar='URL',
                         help='Gemini 相容 API 根網址（亦可修改 config.yaml 或 GEMINI_API_BASE_URL）')
     parser.add_argument('--diarize', action=argparse.BooleanOptionalAction, default=None,
@@ -145,7 +148,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(str(exc))
     settings = DEFAULT_SETTINGS.copy()
     for key, value in config.items():
-        if key not in ('api_base_url', 'default_language'):
+        if key in DEFAULT_SETTINGS:
             settings[key] = value
     if 'default_language' in config:
         settings['language'] = config['default_language']
@@ -181,6 +184,8 @@ def cache_state(args: argparse.Namespace, source_spec: dict, api_base_url: str |
              'chunk_seconds': args.chunk_minutes * 60, 'overlap': args.overlap}
     if api_base_url:
         state['api_base_url'] = api_base_url
+    if getattr(args, 'audio_input', 'file') != 'file':
+        state['audio_input'] = args.audio_input
     return state
 
 
@@ -224,19 +229,34 @@ def is_transient(exc: Exception) -> bool:
 
 
 def transcribe_segment(client, wav_path: Path, duration: float, language: str,
-                       diarize: bool, retries: int, *, model: str = MODEL) -> dict:
+                       diarize: bool, retries: int, *, model: str = MODEL,
+                       audio_input: str = 'file') -> dict:
+    if audio_input not in ('file', 'inline'):
+        raise ValueError('audio_input 必須係 file 或 inline')
     config = make_config(language, diarize)
     for attempt in range(retries + 1):
         uploaded = None
         try:
-            uploaded = client.files.upload(file=str(wav_path))
-            if not getattr(uploaded, 'uri', None):
-                raise RuntimeError('Gemini Files API 冇回傳檔案 URI')
+            if audio_input == 'inline':
+                # Leave enough room for base64 and request overhead under the
+                # documented inline-data size limit (100 MB / request).
+                if wav_path.stat().st_size > 60 * 1024 * 1024:
+                    raise ValueError('Inline 音訊超過 60 MiB；請縮短 --chunk-minutes 或使用 file 模式。')
+                audio_part = {
+                    'type': 'audio',
+                    'data': base64.b64encode(wav_path.read_bytes()).decode('ascii'),
+                    'mime_type': 'audio/wav',
+                }
+            else:
+                uploaded = client.files.upload(file=str(wav_path))
+                if not getattr(uploaded, 'uri', None):
+                    raise RuntimeError('Gemini Files API 冇回傳檔案 URI')
+                audio_part = {
+                    'type': 'audio', 'uri': uploaded.uri,
+                    'mime_type': uploaded.mime_type or 'audio/wav',
+                }
             interaction = client.interactions.create(
-                model=model,
-                input=[{'type': 'audio', 'uri': uploaded.uri,
-                        'mime_type': uploaded.mime_type or 'audio/wav'}],
-                generation_config=config,
+                model=model, input=[audio_part], generation_config=config,
             )
             status_obj = getattr(interaction, 'status', 'completed')
             status = str(getattr(status_obj, 'value', status_obj)).lower().rsplit('.', 1)[-1]
@@ -248,6 +268,15 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
                 raise RuntimeError('Gemini 回傳咗文字但冇任何 word_info 時間碼；避免製作錯誤 SRT，已停止。')
             return {'text': raw_text, 'words': word_dicts(words)}
         except Exception as exc:
+            if 'requires audio input' in str(exc).lower():
+                if audio_input == 'file':
+                    raise RuntimeError(
+                        'Gemini / Proxy 表示冇收到音訊。Files API URI 可能無法由後端讀取；'
+                        '請試 --audio-input inline --restart；如仍失敗，需檢查 Proxy 對 /v1beta/interactions 嘅音訊支援。'
+                    ) from exc
+                raise RuntimeError(
+                    'Proxy 連 Inline 音訊都識別唔到；請檢查 Proxy 對 Interactions API 嘅 audio data 欄位支援。'
+                ) from exc
             if attempt >= retries or not is_transient(exc):
                 raise
             delay = min(45, 2 ** (attempt + 2))
@@ -269,6 +298,9 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         raise ValueError('--overlap 必須 >= 0 並少於每段長度 1/4')
     if args.retries < 0:
         raise ValueError('--retries 不能為負數')
+    audio_input = getattr(args, 'audio_input', 'file')
+    if audio_input not in ('file', 'inline'):
+        raise ValueError('--audio-input 只接受 file 或 inline')
     api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
                                         config_path=getattr(args, 'config', None))
     if api_base_url and api_base_url.lower().startswith('http://'):
@@ -288,7 +320,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     core_length = args.chunk_minutes * 60
     total_segments = math.ceil(duration / core_length)
     model = getattr(args, 'model', MODEL)
-    out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}')
+    out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}，音訊方式 {audio_input}')
 
     if client is None:
         api_key = resolve_api_key(config_path=getattr(args, 'config', None))
@@ -316,7 +348,8 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
                 if not chunk_file.is_file():
                     build_chunk(media, chunk_file, audio_start, audio_duration)
                 result = transcribe_segment(client, chunk_file, audio_duration,
-                                            args.language, args.diarize, args.retries, model=model)
+                                            args.language, args.diarize, args.retries,
+                                            model=model, audio_input=audio_input)
                 # Saved only after successful parsing; interrupted jobs can resume.
                 atomic_json(result_file, result)
                 chunk_file.unlink(missing_ok=True)

@@ -28,6 +28,7 @@ DEFAULT_SETTINGS = {
     'gap': 0.75,
     'retries': 3,
     'keep_work': False,
+    'audio_input': 'file',  # 'inline' avoids the Files API for compatible proxies.
 }
 # --restart deliberately stays CLI-only, because it deletes cached data.
 CONFIG_FIELDS = frozenset(DEFAULT_SETTINGS) | {'default_language', 'api_base_url', 'api_key'}
@@ -95,7 +96,7 @@ def load_settings_config(path: Path | str | None = None, *, required: bool = Fal
     if 'default_language' in data and 'language' in data:
         raise ValueError('請只用 default_language 或 language 其中一個設定。')
     for key, value in data.items():
-        if key in ('api_base_url', 'api_key', 'default_language', 'language', 'output', 'model'):
+        if key in ('api_base_url', 'api_key', 'default_language', 'language', 'output', 'model', 'audio_input'):
             if not isinstance(value, str):
                 raise ValueError(f'{path}: {key} 必須係字串。')
             if key in ('default_language', 'language', 'model') and (
@@ -104,6 +105,8 @@ def load_settings_config(path: Path | str | None = None, *, required: bool = Fal
                 raise ValueError(f'{path}: {key} 唔可以含空白。')
             if key == 'model' and not value:
                 raise ValueError(f'{path}: model 唔可以為空。')
+            if key == 'audio_input' and value not in ('file', 'inline'):
+                raise ValueError(f'{path}: audio_input 必須係 file 或 inline。')
             if key == 'api_key' and value and (
                 value != value.strip() or any(c.isspace() for c in value)
             ):

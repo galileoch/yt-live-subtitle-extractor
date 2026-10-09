@@ -105,3 +105,24 @@ py transcribe_youtube.py "D:\Videos\clip.mp4" --api-base-url "http://192.168.1.2
 **測試說明**：可用 `py -m unittest discover -s tests -v` 執行離線測試（測試範例需要 FFmpeg）。未經真實 Proxy 和 Gemini Key 完整端到端驗證。
 
 官方參考：<https://ai.google.dev/gemini-api/docs/transcribe> · <https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe> · <https://github.com/yt-dlp/yt-dlp>
+
+
+## Proxy 回覆 `requires audio input` 時
+
+`gemini-3.5-transcribe requires audio input` 表示 Interactions 服務未收到有效音訊，唔等於 YouTube 下載失敗。
+Google 官方的 Interactions API 支援 Files API URI 同直接內嵌 Base64 音訊。
+第三方 Proxy 如果 Files API 上傳成功但模型無法使用其 URI，可試 Inline：
+
+```powershell
+py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --audio-input inline --restart
+```
+
+亦可以在本地 `config.yaml` 設定 `audio_input: "inline"`（預設 `file`）。
+改變傳輸方式會要求使用 `--restart`（刪除程式管理暫存）或另一個輸出檔名；
+`--restart` 可能導致重新下載，並對已完成的段落重新使用 API 額度。
+Inline 模式唔會呼叫 Files API，會將每段 WAV 編碼為 Base64 直接放入 Interactions API 請求。
+如果仍然出現同一個 400，代表 Proxy 可能唔支援 Interactions audio 內容，需要查 Proxy request body／轉發實作。
+Inline 上限每段 60 MiB，若 Proxy 返回 413 Payload Too Large，縮小 `chunk_minutes`（例如 1 或 2）。
+請勿公開記錄 Base64 音訊、API Key 或完整請求 body；HTTP Proxy 冇 TLS 加密，使用時需評估私隱風險。
+
+官方參考：<https://ai.google.dev/gemini-api/docs/transcribe>、<https://ai.google.dev/api/interactions-api>。
