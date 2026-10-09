@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -17,29 +16,11 @@ import time
 from urllib.parse import urlparse
 
 from subtitle_core import Word, accept_core_words, make_cues, parse_annotations, render_srt, render_txt, word_dicts
+from app_settings import (MODEL, DEFAULT_SETTINGS, default_config_path,
+                          load_settings_config, resolve_api_base_url, resolve_api_key,
+                          validate_api_base_url)
 
-MODEL = 'gemini-3.5-transcribe'
 MANAGED = '.gemini-stt-managed'
-DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com'
-
-# CLI flags override these values; config.json can override them project-wide.
-DEFAULT_SETTINGS = {
-    'output': 'transcript.srt',
-    'language': '',  # Empty string means auto-detect.
-    'model': MODEL,
-    'diarize': False,
-    'chunk_minutes': 10,
-    'overlap': 2.0,
-    'max_chars': 64,
-    'max_words': 14,
-    'max_seconds': 5.5,
-    'gap': 0.75,
-    'retries': 3,
-    'keep_work': False,
-}
-# Keep --restart CLI-only to prevent accidental cache deletion / API charges.
-CONFIG_FIELDS = frozenset(DEFAULT_SETTINGS) | {'default_language', 'api_base_url'}
-
 
 
 def out(message: str) -> None:
@@ -134,93 +115,16 @@ def atomic_json(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def validate_api_base_url(value: str) -> str | None:
-    """Validate a Gemini-compatible API root URL, never a full API method URL.
-
-    Returning None for the official Gemini API root preserves the SDK default.
-    """
-    if not isinstance(value, str) or not value or value != value.strip() or any(ch.isspace() for ch in value):
-        raise ValueError('API URL 必須係有效網址，不能為空或包含空白。')
-    parsed = urlparse(value)
-    if (parsed.scheme not in ('https', 'http') or not parsed.hostname or
-            parsed.username is not None or parsed.password is not None or
-            parsed.query or parsed.fragment or parsed.params):
-        raise ValueError('API URL 必須係 HTTPS 根網址（不能含帳密、query 或 fragment）。')
-    try:
-        _ = parsed.port
-    except ValueError as exc:
-        raise ValueError('API URL port 無效。') from exc
-    if parsed.scheme == 'http' and parsed.hostname.lower() not in ('localhost', '127.0.0.1', '::1'):
-        raise ValueError('非本機 API URL 必須用 HTTPS，避免洩漏 API Key／音訊。')
-    if parsed.path.rstrip('/').split('/')[-1].lower() in ('v1', 'v1beta', 'v1alpha', 'models', 'interactions', 'files', 'upload'):
-        raise ValueError('請填 API Base URL（不含 /v1beta 等版本路徑），SDK 會自動加入版本。')
-    normalized = value.rstrip('/')
-    return None if normalized == DEFAULT_GEMINI_BASE_URL else normalized
-
-
-def load_settings_config(path: Path | str | None = None, *, required: bool = False) -> dict:
-    """Load an optional local JSON config, rejecting silent typos and wrong types."""
-    path = Path(path).expanduser() if path is not None else Path(__file__).with_name('config.json')
-    if not path.is_file():
-        if required or path.exists():
-            raise ValueError(f'找唔到有效設定檔：{path}')
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding='utf-8-sig'))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f'讀取 {path} 失敗：{exc}') from exc
-    if not isinstance(data, dict):
-        raise ValueError(f'{path} 必須係 JSON object。')
-    unknown = set(data) - CONFIG_FIELDS
-    if unknown:
-        raise ValueError(f'{path} 含未知設定：{", ".join(sorted(unknown))}')
-    if 'default_language' in data and 'language' in data:
-        raise ValueError('請只用 default_language 或 language 其中一個設定。')
-    for key, value in data.items():
-        if key in ('api_base_url', 'default_language', 'language', 'output', 'model'):
-            if not isinstance(value, str):
-                raise ValueError(f'{path}: {key} 必須係字串。')
-            if key in ('default_language', 'language', 'model') and (value != value.strip() or any(c.isspace() for c in value)):
-                raise ValueError(f'{path}: {key} 唔可以含空白。')
-            if key == 'model' and not value:
-                raise ValueError(f'{path}: model 唔可以為空。')
-            if key == 'api_base_url':
-                validate_api_base_url(value)
-        elif key in ('diarize', 'keep_work'):
-            if type(value) is not bool:
-                raise ValueError(f'{path}: {key} 必須係 true 或 false。')
-        elif key in ('max_chars', 'max_words', 'retries'):
-            if type(value) is not int:
-                raise ValueError(f'{path}: {key} 必須係整數。')
-        else:
-            if type(value) not in (int, float) or not math.isfinite(value):
-                raise ValueError(f'{path}: {key} 必須係有限數字。')
-    return data
-
-
-def resolve_api_base_url(cli_url: str | None, *, config_path: Path | str | None = None,
-                         environ: dict[str, str] | None = None) -> str | None:
-    """Priority: --api-base-url > GEMINI_API_BASE_URL > config.json > SDK default."""
-    environ = os.environ if environ is None else environ
-    if cli_url is not None:
-        return validate_api_base_url(cli_url)
-    env_url = environ.get('GEMINI_API_BASE_URL', '').strip()
-    if env_url:
-        return validate_api_base_url(env_url)
-    config = load_settings_config(config_path, required=False)
-    return validate_api_base_url(config['api_base_url']) if 'api_base_url' in config else None
-
-
 def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Resolve defaults < config.json < CLI; API URL also supports environment override."""
+    """Resolve defaults < config.yaml < CLI; API URL also supports environment override."""
     parser = argparse.ArgumentParser(description='YouTube / media -> Gemini word timestamps -> SRT/TXT')
     parser.add_argument('source', help='YouTube 影片 URL 或本地 MP3/MP4/WAV 等檔案')
-    parser.add_argument('--config', default=None, metavar='FILE', help='指定 JSON 設定檔（預設程式旁 config.json）')
+    parser.add_argument('--config', default=None, metavar='FILE', help='指定 YAML 設定檔（預設程式旁 config.yaml，兼容舊 JSON）')
     parser.add_argument('-o', '--output', default=None, help='輸出 SRT 路徑')
     parser.add_argument('--language', default=None, help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；空字串自動偵測')
     parser.add_argument('--model', default=None, help='轉錄模型名稱')
     parser.add_argument('--api-base-url', default=None, metavar='URL',
-                        help='Gemini 相容 API 根網址（亦可修改 config.json 或 GEMINI_API_BASE_URL）')
+                        help='Gemini 相容 API 根網址（亦可修改 config.yaml 或 GEMINI_API_BASE_URL）')
     parser.add_argument('--diarize', action=argparse.BooleanOptionalAction, default=None,
                         help='要求識別說話者，SRT 加上 speaker 標籤')
     parser.add_argument('--chunk-minutes', type=float, default=None, help='每段核心長度（0.5–25 分鐘）')
@@ -234,7 +138,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help='完成後保留下載音訊／暫存轉錄結果')
     parser.add_argument('--restart', action='store_true', help='清除程式管理嘅舊暫存，從頭開始（只限 CLI）')
     parsed = parser.parse_args(argv)
-    path = Path(parsed.config).expanduser() if parsed.config else Path(__file__).with_name('config.json')
+    path = Path(parsed.config).expanduser() if parsed.config else default_config_path()
     try:
         config = load_settings_config(path, required=parsed.config is not None)
     except ValueError as exc:
@@ -367,6 +271,8 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         raise ValueError('--retries 不能為負數')
     api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
                                         config_path=getattr(args, 'config', None))
+    if api_base_url and api_base_url.lower().startswith('http://'):
+        out('警告：HTTP API Proxy 並無 TLS 加密；API Key 同音訊可能被網絡中間人截取。')
     source_spec = resolve_source(args.source)
     check_tools(source_spec)
     srt_path = Path(args.output).expanduser().resolve()
@@ -385,9 +291,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}')
 
     if client is None:
-        api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
-        if not api_key:
-            raise RuntimeError('請先設定 GEMINI_API_KEY（或 GOOGLE_API_KEY）環境變數。')
+        api_key = resolve_api_key(config_path=getattr(args, 'config', None))
         try:
             from google import genai
         except ImportError as exc:

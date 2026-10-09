@@ -11,4 +11,11 @@ __pycache__/
 *.wav
 *.mp3
 *.mp4
+# Local configuration can contain API keys. Templates are safe to track.
+config.yaml
+config.yml
 config.json
+config.*.yaml
+config.*.yml
+config.*.json
+!config.example.yaml

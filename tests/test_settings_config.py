@@ -71,7 +71,7 @@ class SettingsConfigTests(unittest.TestCase):
         self.assertFalse(args.restart)
 
     def test_unknown_fields_and_bad_types_fail_fast(self):
-        for bad in ({'api_key': 'should-not-commit'}, {'default_language': 123},
+        for bad in ({'api_key': 123}, {'default_language': 123},
                     {'max_words': 5.2}, {'chunk_minutes': True}, {'diarize': 'yes'},
                     {'retries': -1}, {'max_seconds': 0}, {'model': '  '},
                     {'language': 'ja-JP', 'default_language': 'en-US'},
@@ -93,8 +93,21 @@ class SettingsConfigTests(unittest.TestCase):
             state = cache_state(args, {'source': 'video.mp4'})
             self.assertEqual(state['model'], 'gemini-new')
 
+    def test_yaml_cli_default_and_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'my-config.yaml'
+            path.write_text('api_key: "private-test-key"\ndefault_language: ja-JP\n'
+                            'model: gemini-test-transcribe\nmax_chars: 42\n', encoding='utf-8')
+            args = parse_cli_args(['video.mp4', '--config', str(path)])
+            self.assertEqual((args.language, args.model, args.max_chars),
+                             ('ja-JP', 'gemini-test-transcribe', 42))
+            # The secret must not be placed in argparse output or cached state.
+            self.assertNotIn('api_key', vars(args))
+            args2 = parse_cli_args(['video.mp4', '--config', str(path), '--language', 'en-US'])
+            self.assertEqual(args2.language, 'en-US')
+
     def test_sample_config_is_valid(self):
-        path = Path(__file__).resolve().parents[1] / 'config.example.json'
+        path = Path(__file__).resolve().parents[1] / 'config.example.yaml'
         self.assertEqual(load_settings_config(path)['default_language'], 'ja-JP')
 
 

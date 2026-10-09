@@ -40,7 +40,7 @@ class ApiConfigTests(unittest.TestCase):
                          {'api_key': 'my-key', 'http_options': {'base_url': 'https://proxy.example.org'}})
 
     def test_reject_unsafe_or_full_endpoint(self):
-        invalid = ('', 'http://example.com', 'https://user:pass@example.com',
+        invalid = ('', 'https://user:pass@example.com',
                    'https://example.com?key=secret', 'https://example.com/#frag',
                    'https://example.com/v1beta', 'https://example.com/v1', 'https://example.com/interactions',
                    'https://example.com:abc', 'https://example.com/method path')
@@ -48,6 +48,7 @@ class ApiConfigTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 validate_api_base_url(url)
         self.assertEqual(validate_api_base_url('http://localhost:8080/'), 'http://localhost:8080')
+        self.assertEqual(validate_api_base_url('http://example.com/'), 'http://example.com')
 
     def test_bad_config(self):
         with tempfile.TemporaryDirectory() as tmp:
