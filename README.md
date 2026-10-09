@@ -107,6 +107,30 @@ py transcribe_youtube.py "D:\Videos\clip.mp4" --api-base-url "http://192.168.1.2
 官方參考：<https://ai.google.dev/gemini-api/docs/transcribe> · <https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe> · <https://github.com/yt-dlp/yt-dlp>
 
 
+## Gemini 逐字時間碼異常（start > end / 超過音訊長度）
+
+有時 Gemini 會輸出個別錯誤的 `word_info`，例如 `19.900s → 10.100s`。
+新版本會**只跳過少數有問題的字詞**（每段最多 5%，最少容許 1 個），
+**絕不交換、推算或者編造時間碼**。正常字詞的時間保持原樣。
+如果錯誤太多、或者全部時間碼都無效，仍會中止，避免產生不可靠字幕。
+
+每次跳過會顯示警告，結果 JSON 亦增加 `skipped_word_timings` 統計，
+方便你知道生成的字幕有少量缺字並作人工覆核。
+
+**中斷後續做：** 只要 URL、`--audio-input`、`--chunk-minutes`、語言及
+`-o` 同前次一致，重新執行原本指令（**不要加 `--restart`**）；
+已成功完成的段落會由快取載入，失敗段落先重新向 Gemini 請求。
+例如：
+
+```powershell
+git pull
+py transcribe_youtube.py "https://youtu.be/qEmhu7_zMtE" --audio-input inline --chunk-minutes 2
+```
+
+如出現「anomalies exceed recovery limit」，表示問題不止個別字，
+建議先檢查音質，或選擇較短分段另開輸出工作（重新開始會消耗 API 額度）。
+避免單純強行調整時間碼或靜默忽略大量錯誤。
+
 ## Proxy 回覆 `requires audio input` 時
 
 `gemini-3.5-transcribe requires audio input` 表示 Interactions 服務未收到有效音訊，唔等於 YouTube 下載失敗。

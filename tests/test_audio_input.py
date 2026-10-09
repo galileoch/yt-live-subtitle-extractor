@@ -170,5 +170,69 @@ class AudioInputTests(unittest.TestCase):
                     load_settings_config(path)
 
 
+    def test_inline_transcribe_skips_one_bad_word_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            wav = Path(temp) / 'test.wav'
+            wav.write_bytes(b'RIFF' + bytes(80))
+
+            class PartialBadInteractions:
+                def create(self, *, model, input, generation_config):
+                    assert input[0]['type'] == 'audio'
+                    assert model == 'gemini-3.5-transcribe'
+                    annotations = [
+                        SimpleNamespace(
+                            type='word_info', text=f'word{i}',
+                            start_offset=f'{i + .01}s', end_offset=f'{i + .11}s',
+                            speaker=None,
+                        )
+                        for i in range(40)
+                    ]
+                    annotations.insert(20, SimpleNamespace(
+                        type='word_info', text='力',
+                        start_offset='19.900s', end_offset='10.100s',
+                        speaker=None,
+                    ))
+                    return SimpleNamespace(
+                        status='completed', output_text='word transcript',
+                        steps=[SimpleNamespace(content=[
+                            SimpleNamespace(annotations=annotations),
+                        ])],
+                    )
+
+            fake = FakeClient()
+            fake.interactions = PartialBadInteractions()
+            output = transcribe_segment(
+                fake, wav, 124.0, '', False, 0, audio_input='inline',
+            )
+            self.assertEqual(len(output['words']), 40)
+            self.assertEqual(output['skipped_word_timings'], 1)
+            self.assertFalse(any(w['text'] == '力' for w in output['words']))
+            self.assertEqual(fake.files.uploads, 0)
+
+    def test_many_bad_word_timestamps_still_abort(self):
+        with tempfile.TemporaryDirectory() as temp:
+            wav = Path(temp) / 'test.wav'
+            wav.write_bytes(b'RIFF' + bytes(80))
+
+            class BadInteractions:
+                def create(self, **_kwargs):
+                    return SimpleNamespace(
+                        status='completed', output_text='broken timing',
+                        steps=[SimpleNamespace(content=[
+                            SimpleNamespace(annotations=[
+                                SimpleNamespace(type='word_info', text=f'w{i}',
+                                    start_offset='8s', end_offset='2s',
+                                    speaker=None)
+                                for i in range(5)
+                            ])
+                        ])]
+                    )
+
+            fake = FakeClient()
+            fake.interactions = BadInteractions()
+            with self.assertRaisesRegex(ValueError, 'exceed recovery limit'):
+                transcribe_segment(fake, wav, 124.0, '', False, 0, audio_input='inline')
+
+
 if __name__=='__main__':
     unittest.main()

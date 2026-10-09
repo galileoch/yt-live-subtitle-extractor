@@ -287,10 +287,20 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
             if status not in ('completed', 'none', ''):
                 raise RuntimeError(f'Gemini transcription returned status={status}: {getattr(interaction, "error", "")}')
             raw_text = str(getattr(interaction, 'output_text', '') or '').strip()
-            words = parse_annotations(interaction, duration)
+            bad_word_timings: list[str] = []
+            words = parse_annotations(
+                interaction, duration,
+                skip_bad_timestamps=True, skipped=bad_word_timings,
+            )
             if raw_text and not words:
-                raise RuntimeError('Gemini 回傳咗文字但冇任何 word_info 時間碼；避免製作錯誤 SRT，已停止。')
-            return {'text': raw_text, 'words': word_dicts(words)}
+                raise RuntimeError('Gemini 回傳咗文字但冇任何有效 word_info 時間碼；避免製作錯誤 SRT，已停止。')
+            if bad_word_timings:
+                out(f'警告：Gemini 返回 {len(bad_word_timings)} 個不合理逐字時間碼；'
+                    '已略過相關字詞，冇估算或編造時間碼。')
+            return {
+                'text': raw_text, 'words': word_dicts(words),
+                'skipped_word_timings': len(bad_word_timings),
+            }
         except Exception as exc:
             message = str(exc).lower()
             if audio_input == 'inline' and ('413' in message or 'request too large' in message or
@@ -362,6 +372,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         client = genai.Client(**gemini_client_options(api_key, api_base_url))
 
     all_words: list[Word] = []
+    total_skipped_timings = 0
     try:
         for idx in range(total_segments):
             core_start = idx * core_length
@@ -384,6 +395,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
                 # Saved only after successful parsing; interrupted jobs can resume.
                 atomic_json(result_file, result)
                 chunk_file.unlink(missing_ok=True)
+            total_skipped_timings += int(result.get('skipped_word_timings', 0))
             segment_words = [Word(**w) for w in result['words']]
             core_words = accept_core_words(segment_words, audio_start, core_start, core_end,
                                            is_last=(idx == total_segments - 1))
@@ -397,13 +409,18 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         # Generate everything BEFORE replacing final outputs.
         srt_text, txt_text = render_srt(cues), render_txt(cues)
         json_text = json.dumps({'model': model, 'source': source_spec['source'],
-                                'duration_seconds': duration, 'words': word_dicts(all_words)},
+                                'duration_seconds': duration,
+                                'skipped_word_timings': total_skipped_timings,
+                                'words': word_dicts(all_words)},
                                ensure_ascii=False, indent=2)
         for path, content in ((srt_path, srt_text), (txt_path, txt_text), (json_path, json_text)):
             temp = path.with_suffix(path.suffix + '.tmp')
             temp.write_text(content, encoding='utf-8-sig' if path.suffix in ('.txt', '.srt') else 'utf-8')
             temp.replace(path)
         out(f'完成：{len(all_words)} 個詞，{len(cues)} 條字幕')
+        if total_skipped_timings:
+            out(f'注意：全片共略過 {total_skipped_timings} 個時間碼異常字詞；'
+                '如需逐字完整字幕，應覆核相關內容。')
         out(f'SRT: {srt_path}\nTXT: {txt_path}\nWords JSON: {json_path}')
         if not args.keep_work:
             shutil.rmtree(workdir)

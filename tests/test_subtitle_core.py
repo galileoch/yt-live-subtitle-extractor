@@ -101,5 +101,70 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(is_transient(Exception('401 invalid API key')))
 
 
+    def test_isolated_bad_word_time_is_discarded_without_making_up_timestamps(self):
+        good = [
+            {'type': 'word_info', 'text': f'字{i}',
+             'start_offset': f'{i + 0.1:.3f}s',
+             'end_offset': f'{i + 0.4:.3f}s'}
+            for i in range(40)
+        ]
+        invalid = {'type': 'word_info', 'text': '力',
+                   'start_offset': '19.900s', 'end_offset': '10.100s'}
+        good.insert(20, invalid)
+        response = {'steps': [{'content': [{'annotations': good}]}]}
+        skipped = []
+        parsed = parse_annotations(
+            response, 124, skip_bad_timestamps=True, skipped=skipped,
+        )
+        self.assertEqual(len(parsed), 40)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn('19.900-10.100s', skipped[0])
+        self.assertTrue(all(w.start <= w.end for w in parsed))
+        self.assertNotIn('力', [w.text for w in parsed])
+
+    def test_broad_timestamp_corruption_still_fails(self):
+        good = [
+            {'type': 'word_info', 'text': f'good{i}', 'start_offset': f'{i}s',
+             'end_offset': f'{i + .2}s'}
+            for i in range(25)
+        ]
+        bad = [
+            {'type': 'word_info', 'text': f'bad{i}', 'start_offset': '19.900s',
+             'end_offset': '10.100s'}
+            for i in range(3)
+        ]
+        with self.assertRaisesRegex(ValueError, 'exceed recovery limit'):
+            parse_annotations(
+                {'steps': [{'content': [{'annotations': good + bad}]}]},
+                124, skip_bad_timestamps=True,
+            )
+
+    def test_all_invalid_timestamps_still_fail(self):
+        with self.assertRaisesRegex(ValueError, 'exceed recovery limit'):
+            parse_annotations({
+                'steps': [{'content': [{'annotations': [{
+                    'type': 'word_info', 'text': 'a',
+                    'start_offset': '5.000s', 'end_offset': '1.000s',
+                }]}]}],
+            }, 124, skip_bad_timestamps=True)
+
+    def test_small_out_of_range_issue_does_not_change_valid_timestamps(self):
+        annotations = [
+            {'type': 'word_info', 'text': 'right',
+             'start_offset': '1.2s', 'end_offset': '1.4s'},
+            {'type': 'word_info', 'text': 'wrong',
+             'start_offset': '160s', 'end_offset': '160.4s'},
+            {'type': 'word_info', 'text': 'again',
+             'start_offset': '2.0s', 'end_offset': '2.2s'},
+        ]
+        skipped = []
+        result = parse_annotations({
+            'steps': [{'content': [{'annotations': annotations}]}],
+        }, 124, skip_bad_timestamps=True, skipped=skipped)
+        self.assertEqual([(w.text, w.start, w.end) for w in result],
+                         [('right', 1.2, 1.4), ('again', 2.0, 2.2)])
+        self.assertEqual(len(skipped), 1)
+
+
 if __name__ == '__main__':
     unittest.main()
