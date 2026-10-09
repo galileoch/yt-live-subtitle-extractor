@@ -46,9 +46,22 @@ def get_attr(obj: Any, key: str, default: Any = None) -> Any:
     return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
 
-def parse_annotations(interaction: Any, duration: float) -> list[Word]:
-    """Parse Interactions API word_info annotations without guessing timestamps."""
+def parse_annotations(
+    interaction: Any,
+    duration: float,
+    *,
+    skip_bad_timestamps: bool = False,
+    skipped: list[str] | None = None,
+) -> list[Word]:
+    """Parse real Gemini word_info timestamps without inventing missing timings.
+
+    By default all invalid timestamps raise, as before. The transcription
+    pipeline opts into *bounded* recovery: discard a small fraction of clearly
+    invalid word annotations but stop if errors suggest a broken response.
+    """
     words: list[Word] = []
+    invalid: list[str] = []
+    seen = 0
     for step in get_attr(interaction, 'steps', []) or []:
         for content in get_attr(step, 'content', []) or []:
             for item in get_attr(content, 'annotations', []) or []:
@@ -57,16 +70,39 @@ def parse_annotations(interaction: Any, duration: float) -> list[Word]:
                 text = str(get_attr(item, 'text', '') or '').strip()
                 if not text:
                     continue
-                start_raw = get_attr(item, 'start_offset')
-                end_raw = get_attr(item, 'end_offset')
-                if start_raw is None or end_raw is None:
-                    raise ValueError(f'Gemini returned word without timing: {text!r}')
-                start, end = offset_seconds(start_raw), offset_seconds(end_raw)
-                # Do NOT manufacture timestamps if the model returned invalid offsets.
-                if end < start or start > duration + 0.5 or end > duration + 0.5:
-                    raise ValueError(f'Gemini word timestamp out of audio range: {text!r} {start:.3f}-{end:.3f}s (audio {duration:.3f}s)')
+                seen += 1
+                try:
+                    start_raw = get_attr(item, 'start_offset')
+                    end_raw = get_attr(item, 'end_offset')
+                    if start_raw is None or end_raw is None:
+                        raise ValueError(f'Gemini returned word without timing: {text!r}')
+                    start, end = offset_seconds(start_raw), offset_seconds(end_raw)
+                    if end < start or start > duration + 0.5 or end > duration + 0.5:
+                        raise ValueError(
+                            f'Gemini word timestamp out of audio range: {text!r} '
+                            f'{start:.3f}-{end:.3f}s (audio {duration:.3f}s)'
+                        )
+                except ValueError as exc:
+                    if not skip_bad_timestamps:
+                        raise
+                    invalid.append(str(exc))
+                    continue
                 speaker = str(get_attr(item, 'speaker', '') or '')
                 words.append(Word(text, min(start, duration), min(end, duration), speaker))
+
+    if invalid:
+        # Avoid outputting incomplete subtitles if Google's timing metadata is
+        # broadly corrupted. At most 5% of annotated words may be discarded,
+        # with a one-word allowance for short transcripts.
+        allowed = max(1, int(seen * 0.05))
+        if len(invalid) > allowed or not words:
+            raise ValueError(
+                f'Gemini word timestamp anomalies exceed recovery limit '
+                f'({len(invalid)}/{seen}, allowed {allowed}); '
+                f'first error: {invalid[0]}'
+            )
+        if skipped is not None:
+            skipped.extend(invalid)
     return sorted(words, key=lambda w: (w.start, w.end))
 
 
