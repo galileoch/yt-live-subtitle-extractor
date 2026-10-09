@@ -122,7 +122,7 @@ py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --audio-input inline --rest
 `--restart` 可能導致重新下載，並對已完成的段落重新使用 API 額度。
 Inline 模式唔會呼叫 Files API，會將每段 WAV 編碼為 Base64 直接放入 Interactions API 請求。
 如果仍然出現同一個 400，代表 Proxy 可能唔支援 Interactions audio 內容，需要查 Proxy request body／轉發實作。
-Inline 上限每段 60 MiB，若 Proxy 返回 413 Payload Too Large，縮小 `chunk_minutes`（例如 1 或 2）。
+部分 Proxy 對請求設有 **20 MB HTTP body** 上限。16 kHz WAV 編成 Base64 後會膨脹約 33%；原本預設 10 分鐘音訊容易造成 413。新版 Inline 模式會**自動限制每段核心至最多 4 分鐘**，並考慮 `overlap`，令完整音訊不超過 5 分鐘；當設定 `chunk_minutes: 10`，會自動變成較短段落。可手動使用 `--chunk-minutes 2 --restart` 進一步縮短。現有暫存如來自舊版 10 分鐘 Inline 分段，因分段規格已改，需 `--restart` 或換輸出檔名，避免混用。
 請勿公開記錄 Base64 音訊、API Key 或完整請求 body；HTTP Proxy 冇 TLS 加密，使用時需評估私隱風險。
 
 官方參考：<https://ai.google.dev/gemini-api/docs/transcribe>、<https://ai.google.dev/api/interactions-api>。

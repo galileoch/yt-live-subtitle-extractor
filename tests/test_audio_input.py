@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import subprocess
+from unittest import mock
 import json
 from pathlib import Path
 import sys
@@ -13,7 +15,8 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from app_settings import load_settings_config
-from transcribe_youtube import cache_state, parse_cli_args, transcribe_segment
+from transcribe_youtube import (cache_state, effective_chunk_seconds, parse_cli_args,
+                                transcribe_segment, run_pipeline)
 
 
 class FakeFiles:
@@ -109,6 +112,54 @@ class AudioInputTests(unittest.TestCase):
             args2=parse_cli_args(['video.mp4','--config',str(path),'--audio-input','file'])
             self.assertEqual(args2.audio_input,'file')
             self.assertNotIn('audio_input',cache_state(args2,{'source':'video.mp4'}))
+
+    def test_inline_caps_at_four_minutes_and_manifest_tracks_effective_size(self):
+        args = argparse.Namespace(chunk_minutes=10, overlap=2, audio_input='inline',
+                                  language='en-US', diarize=False, model='gemini-3.5-transcribe')
+        self.assertEqual(effective_chunk_seconds(args, 'inline'), 240.0)
+        self.assertEqual(effective_chunk_seconds(args, 'file'), 600.0)
+        state = cache_state(args, {'source': 'movie.mp4'})
+        self.assertEqual(state['effective_chunk_seconds'], 240.0)
+        args.chunk_minutes = 4
+        self.assertEqual(effective_chunk_seconds(args, 'inline'), 240.0)
+        self.assertNotIn('effective_chunk_seconds', cache_state(args, {'source': 'movie.mp4'}))
+        args.overlap = 120
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            effective_chunk_seconds(args, 'inline')
+
+    def test_inline_413_gives_specific_guidance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            wav = Path(temp) / 'small.wav'
+            wav.write_bytes(b'RIFF' + b'\0' * 100)
+            fake = FakeClient(RuntimeError('Error code: 413 - Inline request exceeds the 20 MB API limit'))
+            with self.assertRaisesRegex(RuntimeError, '--chunk-minutes 2 --restart'):
+                transcribe_segment(fake, wav, 0.2, '', False, 0, audio_input='inline')
+            self.assertEqual(fake.files.uploads, 0)
+
+    def test_inline_full_pipeline_auto_resizes_and_keeps_timestamps(self):
+        # Reduce the cap ONLY in the test, so 13 seconds exercises three chunks.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wav = root / 'input.wav'
+            subprocess.run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-f', 'lavfi',
+                            '-i', 'anullsrc=r=16000:cl=mono', '-t', '13', '-c:a', 'pcm_s16le',
+                            '-y', str(wav)], check=True)
+            args = argparse.Namespace(source=str(wav), output=str(root / 'out.srt'),
+                                      language='en-US', model='gemini-3.5-transcribe',
+                                      diarize=False, chunk_minutes=0.5, overlap=0.5,
+                                      max_chars=64, max_words=14, max_seconds=5.5,
+                                      gap=.75, retries=0, keep_work=True,
+                                      restart=False, audio_input='inline', config=None,
+                                      api_base_url=None)
+            fake = FakeClient()
+            with mock.patch('transcribe_youtube.INLINE_MAX_CORE_SECONDS', 5):
+                output_paths = run_pipeline(args, client=fake)
+            self.assertEqual(fake.interactions.calls, 3)
+            self.assertEqual(fake.files.uploads, 0)
+            self.assertEqual(len(output_paths), 3)
+            manifest = json.loads((root / '.out.gemini-stt-work' / 'manifest.json').read_text())
+            self.assertEqual(manifest['effective_chunk_seconds'], 5.0)
+            self.assertTrue((root / 'out.srt').is_file())
 
     def test_reject_bad_audio_mode(self):
         with tempfile.TemporaryDirectory() as temp:

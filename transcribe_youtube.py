@@ -22,6 +22,12 @@ from app_settings import (MODEL, DEFAULT_SETTINGS, default_config_path,
                           validate_api_base_url)
 
 MANAGED = '.gemini-stt-managed'
+# Several Gemini-compatible proxies reject inline request bodies above 20 MB.
+# PCM mono 16 kHz/16 bit is 32 KB/s; base64 expands it by about one third.
+# Cap each complete chunk (including overlap) to 5 minutes, and core to 4.
+INLINE_MAX_CORE_SECONDS = 240.0
+INLINE_MAX_TOTAL_AUDIO_SECONDS = 300.0
+INLINE_MAX_WAV_BYTES = 12 * 1024 * 1024  # base64 <= 16 MiB (+ small JSON overhead)
 
 
 def out(message: str) -> None:
@@ -178,14 +184,31 @@ def gemini_client_options(api_key: str, api_base_url: str | None) -> dict:
     return options
 
 
+def effective_chunk_seconds(args: argparse.Namespace, audio_input: str) -> float:
+    '''Choose safe PCM/Base64 segments for proxies with 20 MB HTTP body limits.'''
+    requested = args.chunk_minutes * 60
+    if audio_input != 'inline':
+        return requested
+    core = min(requested, INLINE_MAX_CORE_SECONDS,
+               INLINE_MAX_TOTAL_AUDIO_SECONDS - 2 * args.overlap)
+    if core <= 0 or args.overlap >= core / 4:
+        raise ValueError('Inline 模式嘅 --overlap 太大；請減少 --overlap（建議 2 秒）。')
+    return core
+
+
 def cache_state(args: argparse.Namespace, source_spec: dict, api_base_url: str | None = None) -> dict:
     state = {'version': 2, 'source': source_spec, 'model': getattr(args, 'model', MODEL),
              'language': args.language, 'diarize': args.diarize,
              'chunk_seconds': args.chunk_minutes * 60, 'overlap': args.overlap}
     if api_base_url:
         state['api_base_url'] = api_base_url
-    if getattr(args, 'audio_input', 'file') != 'file':
-        state['audio_input'] = args.audio_input
+    audio_input = getattr(args, 'audio_input', 'file')
+    if audio_input != 'file':
+        state['audio_input'] = audio_input
+        actual_seconds = effective_chunk_seconds(args, audio_input)
+        if actual_seconds != args.chunk_minutes * 60:
+            # Invalidates old caches based on the larger, pre-fix segment size.
+            state['effective_chunk_seconds'] = actual_seconds
     return state
 
 
@@ -238,10 +261,11 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
         uploaded = None
         try:
             if audio_input == 'inline':
-                # Leave enough room for base64 and request overhead under the
-                # documented inline-data size limit (100 MB / request).
-                if wav_path.stat().st_size > 60 * 1024 * 1024:
-                    raise ValueError('Inline 音訊超過 60 MiB；請縮短 --chunk-minutes 或使用 file 模式。')
+                # Check BEFORE encoding/sending. 12 MiB WAV <= 16 MiB Base64,
+                # leaving headroom for metadata under a 20 MB proxy cap.
+                if wav_path.stat().st_size > INLINE_MAX_WAV_BYTES:
+                    raise ValueError('Inline 音訊過大（Base64 後可能超過 20 MB）。'
+                                     '請試 --chunk-minutes 2 --restart，或使用 file 模式。')
                 audio_part = {
                     'type': 'audio',
                     'data': base64.b64encode(wav_path.read_bytes()).decode('ascii'),
@@ -268,7 +292,12 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
                 raise RuntimeError('Gemini 回傳咗文字但冇任何 word_info 時間碼；避免製作錯誤 SRT，已停止。')
             return {'text': raw_text, 'words': word_dicts(words)}
         except Exception as exc:
-            if 'requires audio input' in str(exc).lower():
+            message = str(exc).lower()
+            if audio_input == 'inline' and ('413' in message or 'request too large' in message or
+                                             'payload too large' in message or 'exceeds the 20 mb' in message):
+                raise RuntimeError('Proxy 回覆 413，Inline Base64 音訊請求超出大小上限。'
+                                   '請試 --chunk-minutes 2 --restart，或調高 Proxy body limit。') from exc
+            if 'requires audio input' in message:
                 if audio_input == 'file':
                     raise RuntimeError(
                         'Gemini / Proxy 表示冇收到音訊。Files API URI 可能無法由後端讀取；'
@@ -301,6 +330,9 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     audio_input = getattr(args, 'audio_input', 'file')
     if audio_input not in ('file', 'inline'):
         raise ValueError('--audio-input 只接受 file 或 inline')
+    core_length = effective_chunk_seconds(args, audio_input)
+    if core_length < args.chunk_minutes * 60:
+        out(f'Inline 模式：自動將每段縮短至 {core_length / 60:.2f} 分鐘，避免 20 MB API 上限。')
     api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
                                         config_path=getattr(args, 'config', None))
     if api_base_url and api_base_url.lower().startswith('http://'):
@@ -317,7 +349,6 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
 
     media = source_media(source_spec, workdir)
     duration = probe_duration(media)
-    core_length = args.chunk_minutes * 60
     total_segments = math.ceil(duration / core_length)
     model = getattr(args, 'model', MODEL)
     out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}，音訊方式 {audio_input}')
