@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+*.srt
+*.words.json
+.gemini-stt-work/
+.*.gemini-stt-work/
+*.wav
+*.mp3
+*.mp4
