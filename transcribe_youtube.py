@@ -20,6 +20,8 @@ from subtitle_core import Word, accept_core_words, make_cues, parse_annotations,
 
 MODEL = 'gemini-3.5-transcribe'
 MANAGED = '.gemini-stt-managed'
+DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com'
+
 
 
 def out(message: str) -> None:
@@ -114,10 +116,65 @@ def atomic_json(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def cache_state(args: argparse.Namespace, source_spec: dict) -> dict:
-    return {'version': 2, 'source': source_spec, 'model': MODEL,
-            'language': args.language, 'diarize': args.diarize,
-            'chunk_seconds': args.chunk_minutes * 60, 'overlap': args.overlap}
+def validate_api_base_url(value: str) -> str | None:
+    """Validate a Gemini-compatible API root URL, never a full API method URL.
+
+    Returning None for the official Gemini API root preserves the SDK default.
+    """
+    if not isinstance(value, str) or not value or value != value.strip() or any(ch.isspace() for ch in value):
+        raise ValueError('API URL 必須係有效網址，不能為空或包含空白。')
+    parsed = urlparse(value)
+    if (parsed.scheme not in ('https', 'http') or not parsed.hostname or
+            parsed.username is not None or parsed.password is not None or
+            parsed.query or parsed.fragment or parsed.params):
+        raise ValueError('API URL 必須係 HTTPS 根網址（不能含帳密、query 或 fragment）。')
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError('API URL port 無效。') from exc
+    if parsed.scheme == 'http' and parsed.hostname.lower() not in ('localhost', '127.0.0.1', '::1'):
+        raise ValueError('非本機 API URL 必須用 HTTPS，避免洩漏 API Key／音訊。')
+    if parsed.path.rstrip('/').split('/')[-1].lower() in ('v1', 'v1beta', 'v1alpha', 'models', 'interactions', 'files', 'upload'):
+        raise ValueError('請填 API Base URL（不含 /v1beta 等版本路徑），SDK 會自動加入版本。')
+    normalized = value.rstrip('/')
+    return None if normalized == DEFAULT_GEMINI_BASE_URL else normalized
+
+
+def resolve_api_base_url(cli_url: str | None, *, config_path: Path | None = None,
+                         environ: dict[str, str] | None = None) -> str | None:
+    """Priority: --api-base-url > GEMINI_API_BASE_URL > config.json > SDK default."""
+    environ = os.environ if environ is None else environ
+    if cli_url is not None:
+        return validate_api_base_url(cli_url)
+    env_url = environ.get('GEMINI_API_BASE_URL', '').strip()
+    if env_url:
+        return validate_api_base_url(env_url)
+    config_path = config_path or Path(__file__).with_name('config.json')
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding='utf-8-sig'))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f'讀取 {config_path} 失敗：{exc}') from exc
+        if not isinstance(config, dict) or not isinstance(config.get('api_base_url'), str):
+            raise ValueError(f'{config_path} 必須包含字串 api_base_url。')
+        return validate_api_base_url(config['api_base_url'])
+    return None
+
+
+def gemini_client_options(api_key: str, api_base_url: str | None) -> dict:
+    options = {'api_key': api_key}
+    if api_base_url:
+        options['http_options'] = {'base_url': api_base_url}
+    return options
+
+
+def cache_state(args: argparse.Namespace, source_spec: dict, api_base_url: str | None = None) -> dict:
+    state = {'version': 2, 'source': source_spec, 'model': MODEL,
+             'language': args.language, 'diarize': args.diarize,
+             'chunk_seconds': args.chunk_minutes * 60, 'overlap': args.overlap}
+    if api_base_url:
+        state['api_base_url'] = api_base_url
+    return state
 
 
 def initialize_workdir(workspace: Path, expected: dict, restart: bool) -> None:
@@ -205,6 +262,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         raise ValueError('--overlap 必須 >= 0 並少於每段長度 1/4')
     if args.retries < 0:
         raise ValueError('--retries 不能為負數')
+    api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None))
     source_spec = resolve_source(args.source)
     check_tools(source_spec)
     srt_path = Path(args.output).expanduser().resolve()
@@ -213,7 +271,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     srt_path.parent.mkdir(parents=True, exist_ok=True)
     txt_path, json_path = srt_path.with_suffix('.txt'), srt_path.with_suffix('.words.json')
     workdir = srt_path.parent / f'.{srt_path.stem}.gemini-stt-work'
-    initialize_workdir(workdir, cache_state(args, source_spec), args.restart)
+    initialize_workdir(workdir, cache_state(args, source_spec, api_base_url), args.restart)
 
     media = source_media(source_spec, workdir)
     duration = probe_duration(media)
@@ -229,7 +287,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
             from google import genai
         except ImportError as exc:
             raise RuntimeError('需要 google-genai：py -m pip install -r requirements.txt') from exc
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(**gemini_client_options(api_key, api_base_url))
 
     all_words: list[Word] = []
     try:
@@ -288,6 +346,8 @@ def main() -> None:
     parser.add_argument('source', help='YouTube 影片 URL 或本地 MP3/MP4/WAV 等檔案')
     parser.add_argument('-o', '--output', default='transcript.srt', help='輸出 SRT 路徑（預設 transcript.srt）')
     parser.add_argument('--language', default='', help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；留空自動偵測')
+    parser.add_argument('--api-base-url', default=None, metavar='URL',
+                        help='Gemini 相容 API 根網址（亦可修改 config.json 或 GEMINI_API_BASE_URL）')
     parser.add_argument('--diarize', action='store_true', help='要求識別說話者，SRT 加上 speaker 標籤')
     parser.add_argument('--chunk-minutes', type=float, default=10, help='每段核心長度（預設 10 分鐘，最大 25）')
     parser.add_argument('--overlap', type=float, default=2.0, help='每段首尾重疊秒數（預設 2）')

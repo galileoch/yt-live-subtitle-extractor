@@ -16,6 +16,44 @@ ffmpeg -version
 
 API Key：<https://aistudio.google.com/apikey>。需有可用 Gemini API 模型額度；此工具不提供免費額度或繞過限制。
 
+## 自訂 Gemini API URL
+
+預設使用 Google 官方 API，毋須設定 URL。若要改成自訂 API Gateway / 代理伺服器，可用以下三種方式：
+
+**方法一：修改設定檔（推薦）**
+
+```powershell
+Copy-Item config.example.json config.json
+notepad config.json
+```
+
+把 `config.json` 入面嘅 `api_base_url` 改成你嘅 API 根網址，例如：
+
+```json
+{
+  "api_base_url": "https://your-gemini-proxy.example.com"
+}
+```
+
+`config.json` 已加入 `.gitignore`，方便儲存自己嘅地址，唔會意外 commit。**API Key 請繼續用 `GEMINI_API_KEY` 環境變數，唔好寫入設定檔。**
+
+**方法二：環境變數**（PowerShell）：
+
+```powershell
+$env:GEMINI_API_BASE_URL = 'https://your-gemini-proxy.example.com'
+```
+
+**方法三：命令列參數**（只覆蓋今次執行）：
+
+```powershell
+py transcribe_youtube.py 'https://youtu.be/VIDEO_ID' --api-base-url 'https://your-gemini-proxy.example.com' -o result.srt
+```
+
+設定優先次序：`--api-base-url` ＞ `GEMINI_API_BASE_URL` ＞ `config.json` ＞ Google SDK 官方預設值。自訂 URL 應係 **base URL**，例如 `https://host.example.com/gemini`，**唔好附加 `/v1beta`、`/models`、`/interactions` 或 API Key**；SDK 會自行組成 API 路徑。非本機地址需要 HTTPS，本機開發可使用 `http://localhost:8080`。
+
+注意：呢個程式會用同一地址呼叫 **Gemini Files API（上傳及刪除音訊）同 Interactions API（逐字轉錄）**。第三方 Gateway 必須完整支援以上接口，只支援 `generateContent` 嘅代理唔可以直接使用。使用非 Google 官方地址時，**API Key 同音訊資料可能會傳送到該服務提供者**，請只使用可信服務。更改地址後如已有舊暫存，程式會要求用另一個 `-o` 檔名，或加 `--restart` 重新處理，以避免混用兩個後端結果。
+
+
 ## 轉錄 YouTube
 
 ```powershell
@@ -47,6 +85,7 @@ py transcribe_youtube.py "D:\Videos\interview.mp4" --diarize -o interview.srt
 | 參數 | 用途 |
 |---|---|
 | `--language ja-JP` | 日文；`en-US` 英文、`yue-Hant-HK` 廣東話、`ko-KR` 韓文；不指定自動偵測 |
+| `--api-base-url URL` | 指定 Gemini 相容 API 根網址，覆蓋環境變數及設定檔 |
 | `--chunk-minutes 10` | 每段 10 分鐘，支援 0.5–25 分鐘（因啟用 timestamps，Google 限制 30 分鐘／次） |
 | `--overlap 2` | 分段前後重疊 2 秒，處理跨界句子；只保留核心區時間碼，防止重複字幕 |
 | `--max-seconds 5.5` | 單條字幕最長 5.5 秒 |
