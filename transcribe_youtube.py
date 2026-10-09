@@ -297,11 +297,18 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
             if bad_word_timings:
                 out(f'警告：Gemini 返回 {len(bad_word_timings)} 個不合理逐字時間碼；'
                     '已略過相關字詞，冇估算或編造時間碼。')
+                out(f'  音訊段落長度：{duration:.3f}s；異常時間碼詳情：')
+                for number, detail in enumerate(bad_word_timings, 1):
+                    out(f'  [{number}/{len(bad_word_timings)}] {detail}')
             return {
                 'text': raw_text, 'words': word_dicts(words),
                 'skipped_word_timings': len(bad_word_timings),
             }
         except Exception as exc:
+            status_code = getattr(exc, 'status_code', None) or getattr(exc, 'code', None)
+            status_info = f'；HTTP 狀態：{status_code}' if status_code is not None else ''
+            out(f'轉錄處理錯誤：{type(exc).__name__}{status_info}；'
+                f'第 {attempt + 1}/{retries + 1} 次嘗試')
             message = str(exc).lower()
             if audio_input == 'inline' and ('413' in message or 'request too large' in message or
                                              'payload too large' in message or 'exceeds the 20 mb' in message):
@@ -345,8 +352,6 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         out(f'Inline 模式：自動將每段縮短至 {core_length / 60:.2f} 分鐘，避免 20 MB API 上限。')
     api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
                                         config_path=getattr(args, 'config', None))
-    if api_base_url and api_base_url.lower().startswith('http://'):
-        out('警告：HTTP API Proxy 並無 TLS 加密；API Key 同音訊可能被網絡中間人截取。')
     source_spec = resolve_source(args.source)
     check_tools(source_spec)
     srt_path = Path(args.output).expanduser().resolve()
@@ -389,9 +394,14 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
                 chunk_file = workdir / 'segments' / f'{idx:04d}.wav'
                 if not chunk_file.is_file():
                     build_chunk(media, chunk_file, audio_start, audio_duration)
-                result = transcribe_segment(client, chunk_file, audio_duration,
-                                            args.language, args.diarize, args.retries,
-                                            model=model, audio_input=audio_input)
+                try:
+                    result = transcribe_segment(client, chunk_file, audio_duration,
+                                                args.language, args.diarize, args.retries,
+                                                model=model, audio_input=audio_input)
+                except Exception as exc:
+                    out(f'[{idx+1}/{total_segments}] 段落轉錄失敗：{type(exc).__name__}；'
+                        f'音訊範圍 {audio_start:.1f}s → {audio_end:.1f}s')
+                    raise
                 # Saved only after successful parsing; interrupted jobs can resume.
                 atomic_json(result_file, result)
                 chunk_file.unlink(missing_ok=True)
