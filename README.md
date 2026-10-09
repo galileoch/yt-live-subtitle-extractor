@@ -16,42 +16,73 @@ ffmpeg -version
 
 API Key：<https://aistudio.google.com/apikey>。需有可用 Gemini API 模型額度；此工具不提供免費額度或繞過限制。
 
-## 自訂 Gemini API URL
+## 主要設定都放入 `config.json`（包括預設語言）
 
-預設使用 Google 官方 API，毋須設定 URL。若要改成自訂 API Gateway / 代理伺服器，可用以下三種方式：
-
-**方法一：修改設定檔（推薦）**
+複製範例檔（如果已經有 `config.json`，請直接編輯原有檔案，避免覆蓋自己嘅設定）：
 
 ```powershell
 Copy-Item config.example.json config.json
 notepad config.json
 ```
 
-把 `config.json` 入面嘅 `api_base_url` 改成你嘅 API 根網址，例如：
+`config.json` 設定格式：
 
 ```json
 {
-  "api_base_url": "https://your-gemini-proxy.example.com"
+  "api_base_url": "https://generativelanguage.googleapis.com",
+  "default_language": "ja-JP",
+  "model": "gemini-3.5-transcribe",
+  "output": "transcript.srt",
+  "diarize": false,
+  "chunk_minutes": 10,
+  "overlap": 2,
+  "max_chars": 64,
+  "max_words": 14,
+  "max_seconds": 5.5,
+  "gap": 0.75,
+  "retries": 3,
+  "keep_work": false
 }
 ```
 
-`config.json` 已加入 `.gitignore`，方便儲存自己嘅地址，唔會意外 commit。**API Key 請繼續用 `GEMINI_API_KEY` 環境變數，唔好寫入設定檔。**
+- **`default_language`**：例如 `ja-JP` 日文、`en-US` 英文、`yue-Hant-HK` 廣東話、`ko-KR` 韓文。設成 `""` 就係自動辨識（範例為日文，可自行修改）。亦接受舊式 `language`，但兩個欄位唔可以同時存在。
+- **`model`**：Gemini Transcribe 模型名稱；換模型前要確認新模型支援 Files + Interactions 逐字時間戳接口。
+- **`api_base_url`**：Google 官方 API 根網址，或者你自己嘅 Gemini API Gateway，例如 `https://your-gemini-proxy.example.com`；唔好包含 `/v1beta`、API 方法路徑或 Key。
+- **`output`**：預設 SRT 名稱（相對路徑由執行程式時嘅工作目錄計算），TXT / JSON 會用相同檔名。
+- **`diarize` / `keep_work`**：布林值，JSON 用 `true` 或 `false`。
+- **`chunk_minutes` / `overlap`**：每段分鐘數、前後重疊秒數。
+- **`max_chars` / `max_words` / `max_seconds` / `gap`**：字幕長度、斷句及停頓閾值。
+- **`retries`**：短暫 API 失敗重試次數。
 
-**方法二：環境變數**（PowerShell）：
+只需要填想修改嘅欄位；其餘使用程式預設值。`config.json` 預設位於 `transcribe_youtube.py` 同一資料夾，並且已加入 `.gitignore`。
+
+**執行時只提供影片 URL 即可沿用全部設定**：
+
+```powershell
+py transcribe_youtube.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
+```
+
+需要臨時改語言、輸出或其他設定：
+
+```powershell
+py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --language en-US -o english.srt --max-chars 48
+```
+
+如需指定另一個設定檔：
+
+```powershell
+py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --config configs\japanese.json
+```
+
+亦可以用 `--no-diarize` 或 `--no-keep-work` 臨時將設定檔入面嘅 `true` 關閉。`--restart` 刻意只可以由命令列啟用，避免自動清除快取並重新計費。
+
+設定優先次序：一般欄位 **命令列 > config.json > 程式預設**；只有 API URL 額外支援環境變數，優先次序係 **`--api-base-url` > `GEMINI_API_BASE_URL` > config.json > 官方 SDK 預設**。環境變數例如：
 
 ```powershell
 $env:GEMINI_API_BASE_URL = 'https://your-gemini-proxy.example.com'
 ```
 
-**方法三：命令列參數**（只覆蓋今次執行）：
-
-```powershell
-py transcribe_youtube.py 'https://youtu.be/VIDEO_ID' --api-base-url 'https://your-gemini-proxy.example.com' -o result.srt
-```
-
-設定優先次序：`--api-base-url` ＞ `GEMINI_API_BASE_URL` ＞ `config.json` ＞ Google SDK 官方預設值。自訂 URL 應係 **base URL**，例如 `https://host.example.com/gemini`，**唔好附加 `/v1beta`、`/models`、`/interactions` 或 API Key**；SDK 會自行組成 API 路徑。非本機地址需要 HTTPS，本機開發可使用 `http://localhost:8080`。
-
-注意：呢個程式會用同一地址呼叫 **Gemini Files API（上傳及刪除音訊）同 Interactions API（逐字轉錄）**。第三方 Gateway 必須完整支援以上接口，只支援 `generateContent` 嘅代理唔可以直接使用。使用非 Google 官方地址時，**API Key 同音訊資料可能會傳送到該服務提供者**，請只使用可信服務。更改地址後如已有舊暫存，程式會要求用另一個 `-o` 檔名，或加 `--restart` 重新處理，以避免混用兩個後端結果。
+**API Key 一律用 `GEMINI_API_KEY` / `GOOGLE_API_KEY` 環境變數，唔好將密鑰寫入或 commit 設定檔。** 自訂 API Gateway 須支援 **Gemini Files API**（音訊上傳／刪除）及 **Interactions API**（轉錄），唔係任何 OpenAI-compatible API 都得；第三方 Gateway 會收到 API Key 及音訊。非本機地址必須使用 HTTPS。改咗 API URL、模型或轉錄參數，舊暫存如不兼容，請換一個輸出檔名或明確加 `--restart`。
 
 
 ## 轉錄 YouTube
@@ -62,10 +93,10 @@ py transcribe_youtube.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" --langu
 
 輸出：`japanese.srt`、`japanese.txt`、`japanese.words.json`（每個詞的 `text,start,end,speaker`）。SRT 可在 VLC 或 Subtitle Edit 開啟。
 
-自動辨識語言（例如日英混合）省略 `--language`：
+自動辨識語言（例如日英混合）：設定 `config.json` 入面 `"default_language": ""`，或者執行時明確覆蓋：
 
 ```powershell
-py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --output transcript.srt
+py transcribe_youtube.py "https://youtu.be/VIDEO_ID" --language "" --output transcript.srt
 ```
 
 本地影片／音訊：
@@ -84,15 +115,17 @@ py transcribe_youtube.py "D:\Videos\interview.mp4" --diarize -o interview.srt
 
 | 參數 | 用途 |
 |---|---|
-| `--language ja-JP` | 日文；`en-US` 英文、`yue-Hant-HK` 廣東話、`ko-KR` 韓文；不指定自動偵測 |
+| `--language ja-JP` | 命令列覆蓋 `config.json` 預設語言；`--language ""` 自動偵測 |
 | `--api-base-url URL` | 指定 Gemini 相容 API 根網址，覆蓋環境變數及設定檔 |
+| `--config FILE` | 讀取指定 JSON 設定檔 |
+| `--model NAME` | 覆蓋模型名稱 |
 | `--chunk-minutes 10` | 每段 10 分鐘，支援 0.5–25 分鐘（因啟用 timestamps，Google 限制 30 分鐘／次） |
 | `--overlap 2` | 分段前後重疊 2 秒，處理跨界句子；只保留核心區時間碼，防止重複字幕 |
 | `--max-seconds 5.5` | 單條字幕最長 5.5 秒 |
 | `--max-chars 64` | 字幕最多約 64 個英文字寬（中文字佔兩格） |
 | `--max-words 14` | 每條字幕最多 14 詞 |
-| `--diarize` | 要求說話者標籤（對多人會話較有用） |
-| `--keep-work` | 成功後仍保留下載音訊、分段回應暫存（較佔磁碟） |
+| `--diarize` / `--no-diarize` | 啟用／關閉說話者標籤 |
+| `--keep-work` / `--no-keep-work` | 成功後保留／清除音訊、暫存結果 |
 | `--restart` | 刪除由本程式管理的對應暫存，重新轉錄，會再次產生 API 用量 |
 
 ## 續做及可靠性

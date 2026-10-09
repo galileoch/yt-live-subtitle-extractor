@@ -22,6 +22,24 @@ MODEL = 'gemini-3.5-transcribe'
 MANAGED = '.gemini-stt-managed'
 DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com'
 
+# CLI flags override these values; config.json can override them project-wide.
+DEFAULT_SETTINGS = {
+    'output': 'transcript.srt',
+    'language': '',  # Empty string means auto-detect.
+    'model': MODEL,
+    'diarize': False,
+    'chunk_minutes': 10,
+    'overlap': 2.0,
+    'max_chars': 64,
+    'max_words': 14,
+    'max_seconds': 5.5,
+    'gap': 0.75,
+    'retries': 3,
+    'keep_work': False,
+}
+# Keep --restart CLI-only to prevent accidental cache deletion / API charges.
+CONFIG_FIELDS = frozenset(DEFAULT_SETTINGS) | {'default_language', 'api_base_url'}
+
 
 
 def out(message: str) -> None:
@@ -140,7 +158,47 @@ def validate_api_base_url(value: str) -> str | None:
     return None if normalized == DEFAULT_GEMINI_BASE_URL else normalized
 
 
-def resolve_api_base_url(cli_url: str | None, *, config_path: Path | None = None,
+def load_settings_config(path: Path | str | None = None, *, required: bool = False) -> dict:
+    """Load an optional local JSON config, rejecting silent typos and wrong types."""
+    path = Path(path).expanduser() if path is not None else Path(__file__).with_name('config.json')
+    if not path.is_file():
+        if required or path.exists():
+            raise ValueError(f'找唔到有效設定檔：{path}')
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f'讀取 {path} 失敗：{exc}') from exc
+    if not isinstance(data, dict):
+        raise ValueError(f'{path} 必須係 JSON object。')
+    unknown = set(data) - CONFIG_FIELDS
+    if unknown:
+        raise ValueError(f'{path} 含未知設定：{", ".join(sorted(unknown))}')
+    if 'default_language' in data and 'language' in data:
+        raise ValueError('請只用 default_language 或 language 其中一個設定。')
+    for key, value in data.items():
+        if key in ('api_base_url', 'default_language', 'language', 'output', 'model'):
+            if not isinstance(value, str):
+                raise ValueError(f'{path}: {key} 必須係字串。')
+            if key in ('default_language', 'language', 'model') and (value != value.strip() or any(c.isspace() for c in value)):
+                raise ValueError(f'{path}: {key} 唔可以含空白。')
+            if key == 'model' and not value:
+                raise ValueError(f'{path}: model 唔可以為空。')
+            if key == 'api_base_url':
+                validate_api_base_url(value)
+        elif key in ('diarize', 'keep_work'):
+            if type(value) is not bool:
+                raise ValueError(f'{path}: {key} 必須係 true 或 false。')
+        elif key in ('max_chars', 'max_words', 'retries'):
+            if type(value) is not int:
+                raise ValueError(f'{path}: {key} 必須係整數。')
+        else:
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError(f'{path}: {key} 必須係有限數字。')
+    return data
+
+
+def resolve_api_base_url(cli_url: str | None, *, config_path: Path | str | None = None,
                          environ: dict[str, str] | None = None) -> str | None:
     """Priority: --api-base-url > GEMINI_API_BASE_URL > config.json > SDK default."""
     environ = os.environ if environ is None else environ
@@ -149,16 +207,61 @@ def resolve_api_base_url(cli_url: str | None, *, config_path: Path | None = None
     env_url = environ.get('GEMINI_API_BASE_URL', '').strip()
     if env_url:
         return validate_api_base_url(env_url)
-    config_path = config_path or Path(__file__).with_name('config.json')
-    if config_path.is_file():
-        try:
-            config = json.loads(config_path.read_text(encoding='utf-8-sig'))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f'讀取 {config_path} 失敗：{exc}') from exc
-        if not isinstance(config, dict) or not isinstance(config.get('api_base_url'), str):
-            raise ValueError(f'{config_path} 必須包含字串 api_base_url。')
-        return validate_api_base_url(config['api_base_url'])
-    return None
+    config = load_settings_config(config_path, required=False)
+    return validate_api_base_url(config['api_base_url']) if 'api_base_url' in config else None
+
+
+def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Resolve defaults < config.json < CLI; API URL also supports environment override."""
+    parser = argparse.ArgumentParser(description='YouTube / media -> Gemini word timestamps -> SRT/TXT')
+    parser.add_argument('source', help='YouTube 影片 URL 或本地 MP3/MP4/WAV 等檔案')
+    parser.add_argument('--config', default=None, metavar='FILE', help='指定 JSON 設定檔（預設程式旁 config.json）')
+    parser.add_argument('-o', '--output', default=None, help='輸出 SRT 路徑')
+    parser.add_argument('--language', default=None, help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；空字串自動偵測')
+    parser.add_argument('--model', default=None, help='轉錄模型名稱')
+    parser.add_argument('--api-base-url', default=None, metavar='URL',
+                        help='Gemini 相容 API 根網址（亦可修改 config.json 或 GEMINI_API_BASE_URL）')
+    parser.add_argument('--diarize', action=argparse.BooleanOptionalAction, default=None,
+                        help='要求識別說話者，SRT 加上 speaker 標籤')
+    parser.add_argument('--chunk-minutes', type=float, default=None, help='每段核心長度（0.5–25 分鐘）')
+    parser.add_argument('--overlap', type=float, default=None, help='每段首尾重疊秒數')
+    parser.add_argument('--max-chars', type=int, default=None, help='每條字幕最大顯示寬度')
+    parser.add_argument('--max-words', type=int, default=None, help='每條字幕最多單詞／字詞數')
+    parser.add_argument('--max-seconds', type=float, default=None, help='每條字幕最多秒數')
+    parser.add_argument('--gap', type=float, default=None, help='停頓超過幾秒就分新字幕')
+    parser.add_argument('--retries', type=int, default=None, help='429/5xx 等暫時錯誤重試次數')
+    parser.add_argument('--keep-work', action=argparse.BooleanOptionalAction, default=None,
+                        help='完成後保留下載音訊／暫存轉錄結果')
+    parser.add_argument('--restart', action='store_true', help='清除程式管理嘅舊暫存，從頭開始（只限 CLI）')
+    parsed = parser.parse_args(argv)
+    path = Path(parsed.config).expanduser() if parsed.config else Path(__file__).with_name('config.json')
+    try:
+        config = load_settings_config(path, required=parsed.config is not None)
+    except ValueError as exc:
+        parser.error(str(exc))
+    settings = DEFAULT_SETTINGS.copy()
+    for key, value in config.items():
+        if key not in ('api_base_url', 'default_language'):
+            settings[key] = value
+    if 'default_language' in config:
+        settings['language'] = config['default_language']
+    for key in DEFAULT_SETTINGS:
+        cli_value = getattr(parsed, key)
+        if cli_value is not None:
+            settings[key] = cli_value
+    args = argparse.Namespace(source=parsed.source, config=str(path),
+                              api_base_url=parsed.api_base_url, restart=parsed.restart, **settings)
+    if (not 0.5 <= args.chunk_minutes <= 25 or
+        not 0 <= args.overlap < args.chunk_minutes * 60 / 4 or
+        args.max_chars < 8 or args.max_words < 1 or
+        args.max_seconds <= 0 or args.gap < 0 or args.retries < 0 or
+        not all(math.isfinite(v) for v in (args.chunk_minutes, args.overlap, args.max_seconds, args.gap))):
+        parser.error('設定檔／命令列嘅音訊分段或字幕參數無效。')
+    if not args.model or args.model != args.model.strip() or any(c.isspace() for c in args.model):
+        parser.error('model 必須係非空白嘅模型名稱。')
+    if not args.language == args.language.strip() or any(c.isspace() for c in args.language):
+        parser.error('language 格式無效，請用 ja-JP 等語言代碼，或空字串作自動偵測。')
+    return args
 
 
 def gemini_client_options(api_key: str, api_base_url: str | None) -> dict:
@@ -169,7 +272,7 @@ def gemini_client_options(api_key: str, api_base_url: str | None) -> dict:
 
 
 def cache_state(args: argparse.Namespace, source_spec: dict, api_base_url: str | None = None) -> dict:
-    state = {'version': 2, 'source': source_spec, 'model': MODEL,
+    state = {'version': 2, 'source': source_spec, 'model': getattr(args, 'model', MODEL),
              'language': args.language, 'diarize': args.diarize,
              'chunk_seconds': args.chunk_minutes * 60, 'overlap': args.overlap}
     if api_base_url:
@@ -217,7 +320,7 @@ def is_transient(exc: Exception) -> bool:
 
 
 def transcribe_segment(client, wav_path: Path, duration: float, language: str,
-                       diarize: bool, retries: int) -> dict:
+                       diarize: bool, retries: int, *, model: str = MODEL) -> dict:
     config = make_config(language, diarize)
     for attempt in range(retries + 1):
         uploaded = None
@@ -226,7 +329,7 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
             if not getattr(uploaded, 'uri', None):
                 raise RuntimeError('Gemini Files API 冇回傳檔案 URI')
             interaction = client.interactions.create(
-                model=MODEL,
+                model=model,
                 input=[{'type': 'audio', 'uri': uploaded.uri,
                         'mime_type': uploaded.mime_type or 'audio/wav'}],
                 generation_config=config,
@@ -262,7 +365,8 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
         raise ValueError('--overlap 必須 >= 0 並少於每段長度 1/4')
     if args.retries < 0:
         raise ValueError('--retries 不能為負數')
-    api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None))
+    api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
+                                        config_path=getattr(args, 'config', None))
     source_spec = resolve_source(args.source)
     check_tools(source_spec)
     srt_path = Path(args.output).expanduser().resolve()
@@ -277,7 +381,8 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     duration = probe_duration(media)
     core_length = args.chunk_minutes * 60
     total_segments = math.ceil(duration / core_length)
-    out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {MODEL}')
+    model = getattr(args, 'model', MODEL)
+    out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}')
 
     if client is None:
         api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
@@ -307,7 +412,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
                 if not chunk_file.is_file():
                     build_chunk(media, chunk_file, audio_start, audio_duration)
                 result = transcribe_segment(client, chunk_file, audio_duration,
-                                            args.language, args.diarize, args.retries)
+                                            args.language, args.diarize, args.retries, model=model)
                 # Saved only after successful parsing; interrupted jobs can resume.
                 atomic_json(result_file, result)
                 chunk_file.unlink(missing_ok=True)
@@ -323,7 +428,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
             out('警告：整條影片都冇識別出說話；輸出將會係空白。')
         # Generate everything BEFORE replacing final outputs.
         srt_text, txt_text = render_srt(cues), render_txt(cues)
-        json_text = json.dumps({'model': MODEL, 'source': source_spec['source'],
+        json_text = json.dumps({'model': model, 'source': source_spec['source'],
                                 'duration_seconds': duration, 'words': word_dicts(all_words)},
                                ensure_ascii=False, indent=2)
         for path, content in ((srt_path, srt_text), (txt_path, txt_text), (json_path, json_text)):
@@ -342,25 +447,7 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='YouTube / media -> Gemini word timestamps -> exact-offset SRT/TXT')
-    parser.add_argument('source', help='YouTube 影片 URL 或本地 MP3/MP4/WAV 等檔案')
-    parser.add_argument('-o', '--output', default='transcript.srt', help='輸出 SRT 路徑（預設 transcript.srt）')
-    parser.add_argument('--language', default='', help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；留空自動偵測')
-    parser.add_argument('--api-base-url', default=None, metavar='URL',
-                        help='Gemini 相容 API 根網址（亦可修改 config.json 或 GEMINI_API_BASE_URL）')
-    parser.add_argument('--diarize', action='store_true', help='要求識別說話者，SRT 加上 speaker 標籤')
-    parser.add_argument('--chunk-minutes', type=float, default=10, help='每段核心長度（預設 10 分鐘，最大 25）')
-    parser.add_argument('--overlap', type=float, default=2.0, help='每段首尾重疊秒數（預設 2）')
-    parser.add_argument('--max-chars', type=int, default=64, help='每條字幕最大顯示寬度（預設 64）')
-    parser.add_argument('--max-words', type=int, default=14, help='每條字幕最多單詞／字詞數（預設 14）')
-    parser.add_argument('--max-seconds', type=float, default=5.5, help='每條字幕最多秒數（預設 5.5）')
-    parser.add_argument('--gap', type=float, default=0.75, help='停頓超過幾秒就分新字幕（預設 0.75）')
-    parser.add_argument('--retries', type=int, default=3, help='429/5xx 等暫時錯誤重試次數')
-    parser.add_argument('--keep-work', action='store_true', help='完成後保留下載音訊／暫存轉錄結果')
-    parser.add_argument('--restart', action='store_true', help='清除程式管理嘅舊暫存，從頭開始')
-    args = parser.parse_args()
-    if args.max_chars < 8 or args.max_words < 1 or args.max_seconds <= 0 or args.gap < 0:
-        parser.error('字幕寬度／字數／秒數／停頓參數無效')
+    args = parse_cli_args()
     try:
         run_pipeline(args)
     except KeyboardInterrupt:

@@ -1,3 +1,15 @@
 {
-  "api_base_url": "https://generativelanguage.googleapis.com"
+  "api_base_url": "https://generativelanguage.googleapis.com",
+  "default_language": "ja-JP",
+  "model": "gemini-3.5-transcribe",
+  "output": "transcript.srt",
+  "diarize": false,
+  "chunk_minutes": 10,
+  "overlap": 2,
+  "max_chars": 64,
+  "max_words": 14,
+  "max_seconds": 5.5,
+  "gap": 0.75,
+  "retries": 3,
+  "keep_work": false
 }

@@ -31,16 +31,17 @@ class FakeFiles:
 
 
 class FakeInteractions:
-    def __init__(self, fail_on: int | None = None):
+    def __init__(self, fail_on: int | None = None, model: str = 'gemini-3.5-transcribe'):
         self.calls = 0
         self.fail_on = fail_on
+        self.model = model
 
     def create(self, *, model, input, generation_config):
         i = self.calls
         self.calls += 1
         if i == self.fail_on:
             raise RuntimeError('mock simulated Gemini error')
-        assert model == 'gemini-3.5-transcribe'
+        assert model == self.model
         assert generation_config['transcription_config']['mode']['timestamp_granularities'] == ['word']
         chunk_index = int(input[0]['uri'].rsplit('/', 1)[-1])
         text = ('私', 'Hello', 'おはよう')[chunk_index]
@@ -53,9 +54,9 @@ class FakeInteractions:
 
 
 class FakeClient:
-    def __init__(self, fail_on: int | None = None):
+    def __init__(self, fail_on: int | None = None, model: str = 'gemini-3.5-transcribe'):
         self.files = FakeFiles()
-        self.interactions = FakeInteractions(fail_on)
+        self.interactions = FakeInteractions(fail_on, model)
         self.closed = False
 
     def close(self):
@@ -104,6 +105,22 @@ class PipelineTests(unittest.TestCase):
             cached = FakeClient()
             run_pipeline(args, client=cached)
             self.assertEqual(cached.interactions.calls, 0)
+
+    def test_configured_model_used_for_actual_transcribe_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / 'short.wav'
+            subprocess.run(['ffmpeg', '-nostdin', '-loglevel', 'error', '-f', 'lavfi',
+                            '-i', 'anullsrc=r=16000:cl=mono', '-t', '2', '-c:a', 'pcm_s16le',
+                            '-y', str(video)], check=True)
+            args = args_for(video, root / 'short.srt')
+            args.model = 'gemini-test-transcribe'
+            fake = FakeClient(model=args.model)
+            run_pipeline(args, client=fake)
+            self.assertEqual(fake.interactions.calls, 1)
+            self.assertIn('"model": "gemini-test-transcribe"',
+                          (root / 'short.words.json').read_text('utf-8'))
+
 
 
 if __name__ == '__main__':
