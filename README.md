@@ -37,7 +37,7 @@ diarize: false
 keep_work: false
 ```
 
-由 <https://aistudio.google.com/apikey> 取得 API Key。**將自己的 Key 放入 `config.yaml`，絕對不要放進 `config.example.yaml` 或提交 GitHub。** `.gitignore` 已忽略 `config.yaml`、`config.yml`、`config.json` 及常見衍生設定名稱；Git 曾經追蹤過的檔案仍須另行移出追蹤。
+由 <https://aistudio.google.com/apikey> 取得 API Key。**將自己的 Key 放入 `config.yaml`，絕對不要放進 `config.example.yaml` 或提交 GitHub。** `.gitignore` 已忽略私有設定檔及舊版 `config.json`（避免意外提交密鑰）；Git 曾經追蹤過的檔案仍須另行移出追蹤。
 
 如果唔想喺硬碟存 Key，仍可用環境變數覆蓋：
 
@@ -58,7 +58,7 @@ api_base_url: "http://192.168.1.20:8080"
 default_language: "yue-Hant-HK"
 ```
 
-**HTTP 現已容許非本機 Proxy。** 但 HTTP 不加密；沿路中間人可以讀取或修改 **API Key 和上傳音訊**。只建議在可信內網、VPN 或你清楚風險的環境使用；能用 HTTPS 就盡量用 HTTPS。程式會顯示 HTTP 警告，但不阻止請求。
+**HTTP 現已容許非本機 Proxy。** 但 HTTP 不加密；沿路中間人可以讀取或修改 **API Key 和上傳音訊**。只建議在可信內網、VPN 或你清楚風險的環境使用；能用 HTTPS 就盡量用 HTTPS。程式不會顯示 HTTP/TLS 警告，但連線本身仍然沒有加密。
 
 請輸入 **API 根網址**，例如 `http://host:8080`，而唔係 `http://host:8080/v1beta/interactions`。SDK 會自行組成相關端點。現時程式依賴：
 
@@ -90,8 +90,8 @@ py transcribe_youtube.py "D:\Videos\clip.mp4" --api-base-url "http://192.168.1.2
 
 ### 設定方式
 
-- 預設讀取程式旁嘅 **`config.yaml`**；如果沒有，嘗試 **`config.yml`**，最後讀舊版 **`config.json`** 方便升級。新版本請用 YAML。
-- `--config FILE` 指定 `.yaml`、`.yml` 或舊版 `.json`；指定了不存在檔案會報錯。
+- 預設讀取程式旁嘅 **`config.yaml`**；如果沒有，嘗試 **`config.yml`**。**不再支援 `config.json`**；如有舊設定，請先轉成 YAML。
+- `--config FILE` 只接受 `.yaml` 或 `.yml`；指定了不存在檔案或舊 `.json` 均會報錯。
 - 一般設定由命令列參數覆蓋 YAML，例如 `--model`、`--chunk-minutes`、`--max-chars`、`--no-diarize`。`--restart` 只可命令列指定，以免設定檔意外觸發重做。
 - YAML 使用 `PyYAML.safe_load`；請將 Key 及語言代碼加上引號。未知設定或錯誤型別會報錯。
 - `config.example.yaml` 係公開範本，**唔好填真正 Key**；本機 `config.yaml` 已被 Git 忽略。若已經誤 commit Key，單靠 `.gitignore` 不能刪除歷史紀錄，需立即輪替 Key。

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,6 +106,25 @@ class PipelineTests(unittest.TestCase):
             cached = FakeClient()
             run_pipeline(args, client=cached)
             self.assertEqual(cached.interactions.calls, 0)
+
+    def test_preloaded_config_skips_yaml_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wav = root / 'short.wav'
+            subprocess.run(['ffmpeg', '-nostdin', '-loglevel', 'error',
+                            '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono',
+                            '-t', '2', '-c:a', 'pcm_s16le', '-y', str(wav)], check=True)
+            args = args_for(wav, root / 'short.srt')
+            args.config = str(root / 'does-not-exist.yaml')
+            fake = FakeClient()
+            settings = {'api_base_url': 'https://proxy.example.org',
+                        'api_key': 'test-private-key'}
+            with mock.patch('transcribe_youtube.load_settings_config',
+                            side_effect=AssertionError('unexpected YAML reload')):
+                run_pipeline(args, client=fake, settings_config=settings)
+            self.assertEqual(fake.interactions.calls, 1)
+            manifest = (root / '.short.gemini-stt-work' / 'manifest.json').read_text()
+            self.assertNotIn('test-private-key', manifest)
 
     def test_configured_model_used_for_actual_transcribe_call(self):
         with tempfile.TemporaryDirectory() as tmp:

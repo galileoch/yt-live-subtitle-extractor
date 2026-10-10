@@ -1,23 +1,24 @@
 """Config defaults / CLI overrides; no Gemini calls required."""
 from __future__ import annotations
 
-import argparse
-import json
+import yaml
+from unittest import mock
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from transcribe_youtube import (MODEL, cache_state, load_settings_config,
-                                parse_cli_args, resolve_api_base_url)
+from transcribe_youtube import MODEL, cache_state, parse_cli_args
+from app_settings import (load_settings_config, resolve_api_base_url,
+                          resolve_api_key, default_config_path)
 
 
 class SettingsConfigTests(unittest.TestCase):
-    def test_json_defaults_include_language_and_all_subtitle_options(self):
+    def test_yaml_defaults_include_language_and_all_subtitle_options(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps({
+            path = Path(tmp) / 'config.yaml'
+            path.write_text(yaml.safe_dump({
                 'api_base_url': 'https://proxy.example.org',
                 'default_language': 'yue-Hant-HK',
                 'model': 'gemini-custom-transcribe',
@@ -40,8 +41,8 @@ class SettingsConfigTests(unittest.TestCase):
 
     def test_cli_overrides_config_and_boolean_disable(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps({'default_language': 'ja-JP', 'model': 'a',
+            path = Path(tmp) / 'config.yaml'
+            path.write_text(yaml.safe_dump({'default_language': 'ja-JP', 'model': 'a',
                                         'max_chars': 40, 'diarize': True, 'keep_work': True}))
             args = parse_cli_args(['video.mp4', '--config', str(path), '--language', 'en-US',
                                    '--model', 'b', '--max-chars', '80',
@@ -52,8 +53,8 @@ class SettingsConfigTests(unittest.TestCase):
 
     def test_legacy_language_key_and_auto_detect(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps({'language': 'ja-JP'}))
+            path = Path(tmp) / 'config.yaml'
+            path.write_text(yaml.safe_dump({'language': 'ja-JP'}))
             self.assertEqual(parse_cli_args(['video.mp4', '--config', str(path)]).language, 'ja-JP')
             args = parse_cli_args(['video.mp4', '--config', str(path), '--language', ''])
             self.assertEqual(args.language, '')
@@ -62,7 +63,7 @@ class SettingsConfigTests(unittest.TestCase):
     def test_no_config_reuses_builtin_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(SystemExit) as ctx:
-                parse_cli_args(['video.mp4', '--config', str(Path(tmp) / 'missing.json')])
+                parse_cli_args(['video.mp4', '--config', str(Path(tmp) / 'missing.yaml')])
             self.assertEqual(ctx.exception.code, 2)
         args = parse_cli_args(['video.mp4'])
         self.assertEqual(args.output, 'transcript.srt')
@@ -77,15 +78,15 @@ class SettingsConfigTests(unittest.TestCase):
                     {'language': 'ja-JP', 'default_language': 'en-US'},
                     {'restart': True}):
             with self.subTest(data=bad), tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / 'config.json'
-                path.write_text(json.dumps(bad))
+                path = Path(tmp) / 'config.yaml'
+                path.write_text(yaml.safe_dump(bad))
                 with self.assertRaises(SystemExit):
                     parse_cli_args(['video.mp4', '--config', str(path)])
 
     def test_backend_configuration_env_priority_and_manifest_model(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps({'api_base_url': 'https://config.example.org'}))
+            path = Path(tmp) / 'config.yaml'
+            path.write_text(yaml.safe_dump({'api_base_url': 'https://config.example.org'}))
             self.assertEqual(resolve_api_base_url(None, config_path=path,
                              environ={'GEMINI_API_BASE_URL': 'https://env.example.org'}),
                              'https://env.example.org')
@@ -105,6 +106,68 @@ class SettingsConfigTests(unittest.TestCase):
             self.assertNotIn('api_key', vars(args))
             args2 = parse_cli_args(['video.mp4', '--config', str(path), '--language', 'en-US'])
             self.assertEqual(args2.language, 'en-US')
+
+    def test_cli_can_return_preloaded_settings_without_exposing_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'secure.yaml'
+            path.write_text('api_key: "test-private-key"\ndefault_language: en-US\n')
+            args, config = parse_cli_args(['video.mp4', '--config', str(path)],
+                                          return_config=True)
+            self.assertEqual(config['api_key'], 'test-private-key')
+            self.assertEqual(args.language, 'en-US')
+            self.assertNotIn('api_key', vars(args))
+            self.assertNotIn('test-private-key', str(cache_state(args, {'source': 'video.mp4'})))
+
+    def test_yml_extension_and_proxy_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.yml'
+            path.write_text('api_key: "test-key"\ndefault_language: ja-JP\n'
+                            'api_base_url: http://remote.test:8080\n')
+            self.assertEqual(load_settings_config(path)['default_language'], 'ja-JP')
+            self.assertEqual(resolve_api_key(config_path=path, environ={}), 'test-key')
+            self.assertEqual(resolve_api_base_url(None, config_path=path, environ={}),
+                             'http://remote.test:8080')
+
+    def test_env_key_priority_and_missing_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'config.yaml'
+            path.write_text('api_key: "stored-key"\n')
+            self.assertEqual(resolve_api_key(config_path=path,
+                             environ={'GEMINI_API_KEY': 'env-key',
+                                      'GOOGLE_API_KEY': 'another-key'}), 'env-key')
+            self.assertEqual(resolve_api_key(config_path=path,
+                             environ={'GOOGLE_API_KEY': 'google-key'}), 'google-key')
+            path.write_text('default_language: ""\n')
+            with self.assertRaisesRegex(RuntimeError, 'api_key'):
+                resolve_api_key(config_path=path, environ={})
+
+    def test_yaml_unsafe_tags_and_malformed_values_rejected(self):
+        for content in ('api_key: !!python/object/apply:os.system ["echo bad"]',
+                        'api_base_url: [broken', '[]', 'api_key: 123',
+                        'diarize: "true"', 'chunk_minutes: .nan',
+                        'unexpected: value', 'api_base_url: "https://x.test/v1beta"'):
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'config.yaml'
+                path.write_text(content)
+                with self.assertRaises(ValueError):
+                    load_settings_config(path)
+
+    def test_legacy_json_rejected_and_default_path_ignores_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'config.json'
+            path.write_text('{"api_key":"old-key"}')
+            with self.assertRaisesRegex(ValueError, '只支援'):
+                load_settings_config(path)
+            with self.assertRaises(SystemExit) as ctx:
+                parse_cli_args(['video.mp4', '--config', str(path)])
+            self.assertEqual(ctx.exception.code, 2)
+            with mock.patch('app_settings.__file__', str(root / 'app_settings.py')):
+                self.assertEqual(default_config_path(), root / 'config.yaml')
+                (root / 'config.yml').write_text('default_language: en-US\n')
+                self.assertEqual(default_config_path(), root / 'config.yml')
+                (root / 'config.yaml').write_text('default_language: ja-JP\n')
+                self.assertEqual(default_config_path(), root / 'config.yaml')
 
     def test_sample_config_is_valid(self):
         path = Path(__file__).resolve().parents[1] / 'config.example.yaml'

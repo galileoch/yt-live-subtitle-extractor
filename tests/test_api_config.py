@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 import sys
 import tempfile
@@ -10,8 +9,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from transcribe_youtube import (cache_state, gemini_client_options,
-                                resolve_api_base_url, validate_api_base_url)
+from transcribe_youtube import cache_state, gemini_client_options
+from app_settings import resolve_api_base_url, resolve_api_key, validate_api_base_url
 
 
 class ApiConfigTests(unittest.TestCase):
@@ -24,8 +23,8 @@ class ApiConfigTests(unittest.TestCase):
 
     def test_config_file_and_priority(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            path.write_text(json.dumps({'api_base_url': 'https://config.example.org/gemini/'}))
+            path = Path(tmp) / 'config.yaml'
+            path.write_text('api_base_url: "https://config.example.org/gemini/"\n')
             self.assertEqual(resolve_api_base_url(None, config_path=path, environ={}),
                              'https://config.example.org/gemini')
             self.assertEqual(resolve_api_base_url(None, config_path=path,
@@ -52,11 +51,24 @@ class ApiConfigTests(unittest.TestCase):
 
     def test_bad_config(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'config.json'
-            for content in ('{broken', '[]', '{"other": "ok"}', '{"api_base_url": 123}'):
+            path = Path(tmp) / 'config.yaml'
+            for content in ('api_base_url: [broken', '[]', 'other: ok', 'api_base_url: 123'):
                 path.write_text(content)
                 with self.subTest(content=content), self.assertRaises(ValueError):
                     resolve_api_base_url(None, config_path=path, environ={})
+
+    def test_preloaded_settings_skip_file_reads(self):
+        from unittest import mock
+
+        settings = {'api_base_url': 'https://proxy.example.org', 'api_key': 'test-private-key'}
+        with mock.patch('app_settings.load_settings_config',
+                        side_effect=AssertionError('unexpected second file read')):
+            self.assertEqual(resolve_api_base_url(
+                None, config_path='missing.yaml', environ={}, settings_config=settings),
+                'https://proxy.example.org')
+            self.assertEqual(resolve_api_key(
+                config_path='missing.yaml', environ={}, settings_config=settings),
+                'test-private-key')
 
     def test_cache_separates_custom_endpoint_and_keeps_legacy_default(self):
         args = argparse.Namespace(language='', diarize=False, chunk_minutes=10, overlap=2)
