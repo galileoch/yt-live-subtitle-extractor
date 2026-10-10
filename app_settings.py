@@ -125,7 +125,7 @@ def load_settings_config(path: Path | str | None = None, *, required: bool = Fal
 def resolve_api_base_url(cli_url: str | None, *, config_path: Path | str | None = None,
                          environ: dict[str, str] | None = None,
                          settings_config: dict | None = None) -> str | None:
-    """Priority: CLI > GEMINI_API_BASE_URL > YAML/JSON > Google SDK default."""
+    """Priority: CLI > GEMINI_API_BASE_URL > YAML > Google SDK default."""
     environ = os.environ if environ is None else environ
     if cli_url is not None:
         return validate_api_base_url(cli_url)
