@@ -18,8 +18,7 @@ from urllib.parse import urlparse
 
 from subtitle_core import Word, accept_core_words, make_cues, parse_annotations, render_srt, render_txt, word_dicts
 from app_settings import (MODEL, DEFAULT_SETTINGS, default_config_path,
-                          load_settings_config, resolve_api_base_url, resolve_api_key,
-                          validate_api_base_url)
+                          load_settings_config, resolve_api_base_url, resolve_api_key)
 
 MANAGED = '.gemini-stt-managed'
 # Several Gemini-compatible proxies reject inline request bodies above 20 MB.
@@ -122,11 +121,12 @@ def atomic_json(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
-def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_cli_args(argv: list[str] | None = None, *,
+                   return_config: bool = False) -> argparse.Namespace | tuple[argparse.Namespace, dict]:
     """Resolve defaults < config.yaml < CLI; API URL also supports environment override."""
     parser = argparse.ArgumentParser(description='YouTube / media -> Gemini word timestamps -> SRT/TXT')
     parser.add_argument('source', help='YouTube 影片 URL 或本地 MP3/MP4/WAV 等檔案')
-    parser.add_argument('--config', default=None, metavar='FILE', help='指定 YAML 設定檔（預設程式旁 config.yaml，兼容舊 JSON）')
+    parser.add_argument('--config', default=None, metavar='FILE', help='指定 YAML 設定檔（預設程式旁 config.yaml）')
     parser.add_argument('-o', '--output', default=None, help='輸出 SRT 路徑')
     parser.add_argument('--language', default=None, help='語言代碼，如 ja-JP、en-US、yue-Hant-HK；空字串自動偵測')
     parser.add_argument('--model', default=None, help='轉錄模型名稱')
@@ -174,7 +174,7 @@ def parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error('model 必須係非空白嘅模型名稱。')
     if not args.language == args.language.strip() or any(c.isspace() for c in args.language):
         parser.error('language 格式無效，請用 ja-JP 等語言代碼，或空字串作自動偵測。')
-    return args
+    return (args, config) if return_config else args
 
 
 def gemini_client_options(api_key: str, api_base_url: str | None) -> dict:
@@ -337,7 +337,8 @@ def transcribe_segment(client, wav_path: Path, duration: float, language: str,
     raise AssertionError('unreachable')
 
 
-def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, Path]:
+def run_pipeline(args: argparse.Namespace, *, client=None,
+                 settings_config: dict | None = None) -> tuple[Path, Path, Path]:
     if not (0.5 <= args.chunk_minutes <= 25):
         raise ValueError('--chunk-minutes 必須介乎 0.5 至 25（啟用時間碼上限 30 分鐘）')
     if not (0 <= args.overlap < args.chunk_minutes * 60 / 4):
@@ -350,8 +351,12 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     core_length = effective_chunk_seconds(args, audio_input)
     if core_length < args.chunk_minutes * 60:
         out(f'Inline 模式：自動將每段縮短至 {core_length / 60:.2f} 分鐘，避免 20 MB API 上限。')
+    # CLI passes an already validated config; direct callers load YAML just once.
+    if settings_config is None:
+        settings_config = load_settings_config(getattr(args, 'config', None))
     api_base_url = resolve_api_base_url(getattr(args, 'api_base_url', None),
-                                        config_path=getattr(args, 'config', None))
+                                        config_path=getattr(args, 'config', None),
+                                        settings_config=settings_config)
     source_spec = resolve_source(args.source)
     check_tools(source_spec)
     srt_path = Path(args.output).expanduser().resolve()
@@ -369,7 +374,8 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
     out(f'影片總長 {duration:.2f}s，分成 {total_segments} 段，模型 {model}，音訊方式 {audio_input}')
 
     if client is None:
-        api_key = resolve_api_key(config_path=getattr(args, 'config', None))
+        api_key = resolve_api_key(config_path=getattr(args, 'config', None),
+                                  settings_config=settings_config)
         try:
             from google import genai
         except ImportError as exc:
@@ -442,9 +448,9 @@ def run_pipeline(args: argparse.Namespace, *, client=None) -> tuple[Path, Path, 
 
 
 def main() -> None:
-    args = parse_cli_args()
+    args, settings_config = parse_cli_args(return_config=True)
     try:
-        run_pipeline(args)
+        run_pipeline(args, settings_config=settings_config)
     except KeyboardInterrupt:
         out('\n已中止。完成嘅段落會留喺暫存，重新執行同一指令即可續做。')
         raise SystemExit(130)

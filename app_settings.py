@@ -5,7 +5,6 @@ for migration, but all new examples use YAML. Secrets must never be logged.
 """
 from __future__ import annotations
 
-import json
 import math
 import os
 from pathlib import Path
@@ -35,9 +34,9 @@ CONFIG_FIELDS = frozenset(DEFAULT_SETTINGS) | {'default_language', 'api_base_url
 
 
 def default_config_path() -> Path:
-    """Prefer YAML; preserve legacy config.json until the user migrates it."""
+    """Only YAML configuration files are supported."""
     folder = Path(__file__).resolve().parent
-    for name in ('config.yaml', 'config.yml', 'config.json'):
+    for name in ('config.yaml', 'config.yml'):
         candidate = folder / name
         if candidate.exists():
             return candidate
@@ -66,7 +65,7 @@ def validate_api_base_url(value: str) -> str | None:
 
 
 def load_settings_config(path: Path | str | None = None, *, required: bool = False) -> dict:
-    """Read YAML safely (or legacy JSON), and reject unknown keys and wrong types."""
+    """Read YAML safely and reject unknown keys and wrong types."""
     path = Path(path).expanduser() if path is not None else default_config_path()
     if not path.is_file():
         if required or path.exists():
@@ -76,17 +75,15 @@ def load_settings_config(path: Path | str | None = None, *, required: bool = Fal
         content = path.read_text(encoding='utf-8-sig')
         if path.suffix.lower() in ('.yaml', '.yml'):
             data = yaml.safe_load(content) if content.strip() else {}
-        elif path.suffix.lower() == '.json':
-            data = json.loads(content)
         else:
-            raise ValueError(f'{path}: 只支援 .yaml、.yml 或舊版 .json 設定檔。')
+            raise ValueError(f'{path}: 只支援 .yaml 或 .yml 設定檔；請將舊 config.json 轉為 YAML。')
     except yaml.YAMLError as exc:
         # Do not echo malformed YAML text: it might contain an API key.
         raise ValueError(f'讀取 {path} 失敗：YAML 格式錯誤，請檢查縮排及引號。') from exc
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError) as exc:
         raise ValueError(f'讀取 {path} 失敗：{exc}') from exc
     if not isinstance(data, dict):
-        raise ValueError(f'{path} 必須係 YAML mapping（或舊版 JSON object）。')
+        raise ValueError(f'{path} 必須係 YAML mapping。')
     # YAML can have non-string map keys; avoid confusing error messages / sorting.
     if any(not isinstance(key, str) for key in data):
         raise ValueError(f'{path} 所有設定名稱必須係字串。')
@@ -126,26 +123,28 @@ def load_settings_config(path: Path | str | None = None, *, required: bool = Fal
 
 
 def resolve_api_base_url(cli_url: str | None, *, config_path: Path | str | None = None,
-                         environ: dict[str, str] | None = None) -> str | None:
-    """Priority: CLI > GEMINI_API_BASE_URL > YAML/JSON > Google SDK default."""
+                         environ: dict[str, str] | None = None,
+                         settings_config: dict | None = None) -> str | None:
+    """Priority: CLI > GEMINI_API_BASE_URL > YAML > Google SDK default."""
     environ = os.environ if environ is None else environ
     if cli_url is not None:
         return validate_api_base_url(cli_url)
     env_url = environ.get('GEMINI_API_BASE_URL', '').strip()
     if env_url:
         return validate_api_base_url(env_url)
-    config = load_settings_config(config_path, required=False)
+    config = settings_config if settings_config is not None else load_settings_config(config_path, required=False)
     return validate_api_base_url(config['api_base_url']) if 'api_base_url' in config else None
 
 
 def resolve_api_key(*, config_path: Path | str | None = None,
-                    environ: dict[str, str] | None = None) -> str:
+                    environ: dict[str, str] | None = None,
+                    settings_config: dict | None = None) -> str:
     """Use environment credentials first, falling back to the private YAML key."""
     environ = os.environ if environ is None else environ
     env_key = environ.get('GEMINI_API_KEY') or environ.get('GOOGLE_API_KEY')
     if env_key and env_key.strip():
         return env_key.strip()
-    config = load_settings_config(config_path, required=False)
+    config = settings_config if settings_config is not None else load_settings_config(config_path, required=False)
     key = config.get('api_key', '')
     if key:
         return key
